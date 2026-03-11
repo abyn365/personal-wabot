@@ -407,38 +407,6 @@ async function makeStickerFromQuoted(sock, msg) {
 
 // ─── Core connection ─────────────────────────────────────────────────────────
 
-/**
- * Attempt to generate a pairing code, retrying on transient failures.
- * Returns the code string, or null on permanent failure.
- */
-async function requestPairingCodeWithRetry(sock, phoneNumber, maxAttempts = 5) {
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      // Wait until the WS is in OPEN state (readyState === 1)
-      const deadline = Date.now() + 12_000
-      while (sock.ws?.readyState !== 1 && Date.now() < deadline) {
-        await waitMs(200)
-      }
-      if (sock.ws?.readyState !== 1) {
-        logger.warn({ attempt }, 'Socket not open before pairing code request, retrying...')
-        await waitMs(2000)
-        continue
-      }
-
-      const code = await sock.requestPairingCode(phoneNumber)
-      return code
-    } catch (err) {
-      const status = new Boom(err)?.output?.statusCode
-      logger.warn({ attempt, maxAttempts, status, message: err?.message }, 'Pairing code request failed')
-
-      // 401 / 403 / 405 = permanent (bad session / wrong number / not allowed)
-      if ([401, 403, 405].includes(status)) return null
-
-      if (attempt < maxAttempts) await waitMs(3000 * attempt)
-    }
-  }
-  return null
-}
 
 async function connect() {
   ensureDir(AUTH_DIR)
@@ -448,7 +416,7 @@ async function connect() {
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR)
   const { version } = await fetchLatestBaileysVersion()
 
-  const isNewSession = !state.creds?.registered
+  const needsPairing = !state.creds?.registered
 
   const sock = makeWASocket({
     version,
@@ -456,50 +424,44 @@ async function connect() {
     logger,
     browser: ['Ubuntu', 'Chrome', '22.04'],
     markOnlineOnConnect: !HIDE_ONLINE,
-    // Don't generate QR — we use pairing codes only
     printQRInTerminal: false,
   })
-
-  // ── Pairing code flow for new/unlinked sessions ───────────────────────────
-  if (isNewSession) {
-    const ownerPhone = OWNER_NUMBERS[0]
-
-    if (!ownerPhone) {
-      logger.error('OWNER_NUMBERS is not set. Cannot generate a pairing code. Set it in .env and restart.')
-    } else {
-      logger.info({ phone: ownerPhone }, 'New session — will request pairing code once connected.')
-
-      // Wait for the socket to be connected before requesting a code.
-      // We do this in a background task so we don't block the event loop.
-      ;(async () => {
-        // Give Baileys a moment to initiate the WS handshake
-        await waitMs(3000)
-
-        const code = await requestPairingCodeWithRetry(sock, ownerPhone)
-        if (code) {
-          logger.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
-          logger.info(`  PAIRING CODE: ${code}`)
-          logger.info(`  Phone: +${ownerPhone}`)
-          logger.info('  WhatsApp → Linked Devices → Link a Device')
-          logger.info('  → Link with phone number → enter code above')
-          logger.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
-        } else {
-          logger.error('Could not obtain a pairing code. Check OWNER_NUMBERS and restart.')
-        }
-      })()
-    }
-  }
 
   // ── Credential persistence ────────────────────────────────────────────────
   sock.ev.on('creds.update', saveCreds)
 
   // ── Connection state ──────────────────────────────────────────────────────
-  sock.ev.on('connection.update', ({ connection, lastDisconnect }) => {
+  // Track whether we've already sent the pairing code in this session
+  let pairingCodeSent = false
+
+  sock.ev.on('connection.update', async ({ connection, lastDisconnect }) => {
     if (!connection) return
 
     logger.info({ connection }, 'Connection state changed')
 
     if (connection === 'open') {
+      // ── Pairing code: request immediately once socket is confirmed open ──
+      if (needsPairing && !pairingCodeSent) {
+        pairingCodeSent = true
+        const ownerPhone = OWNER_NUMBERS[0]
+
+        if (!ownerPhone) {
+          logger.error('OWNER_NUMBERS is not set in .env — cannot generate pairing code.')
+        } else {
+          try {
+            const code = await sock.requestPairingCode(ownerPhone)
+            logger.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
+            logger.info(`  PAIRING CODE : ${code}`)
+            logger.info(`  Phone        : +${ownerPhone}`)
+            logger.info('  WhatsApp → Linked Devices → Link a Device')
+            logger.info('  → Link with phone number → enter the code above')
+            logger.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
+          } catch (err) {
+            logger.error({ err }, 'Failed to request pairing code — restart the bot to try again.')
+          }
+        }
+      }
+
       logger.info({ bot: BOT_NAME }, '✅ Bot is online and ready')
       hydrateSchedules(sock)
       setupAutoUpdate(sock)
@@ -513,11 +475,8 @@ async function connect() {
       logger.warn({ code, reason }, 'Connection closed')
 
       if (code === DisconnectReason.loggedOut) {
-        // Stale / revoked session — wipe auth and reconnect fresh so a new
-        // pairing code is generated automatically on the next connect() call.
-        logger.warn('Session was logged out (code 401). Clearing auth and reconnecting for fresh pairing...')
+        logger.warn('Session logged out (401). Clearing auth and reconnecting for fresh pairing...')
         clearAuthDir()
-        // Small delay to avoid a tight loop if WA keeps rejecting immediately
         setTimeout(() => connect(), 3000)
         return
       }
@@ -527,7 +486,6 @@ async function connect() {
         return
       }
 
-      // For all other close reasons, reconnect
       logger.info('Reconnecting in 5s...')
       setTimeout(() => connect(), 5000)
     }
