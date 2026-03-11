@@ -596,19 +596,20 @@ async function connect() {
         logger.warn({ code, reason: connReasonLabel(code), shouldReconnect }, 'Connection closed')
       }
       if (code === DisconnectReason.loggedOut) {
-        if (awaitingInitialPairing) {
-          pairingState.reconnects += 1
-          if (pairingState.reconnects > INITIAL_PAIRING_MAX_RECONNECTS) {
-            logger.error({ reconnects: pairingState.reconnects, maxReconnects: INITIAL_PAIRING_MAX_RECONNECTS }, 'Initial pairing reconnect limit reached. Restart bot to request a fresh code again.')
+          if (awaitingInitialPairing) {
+            pairingState.reconnects += 1
+            if (pairingState.reconnects > INITIAL_PAIRING_MAX_RECONNECTS) {
+              logger.error({ reconnects: pairingState.reconnects, maxReconnects: INITIAL_PAIRING_MAX_RECONNECTS }, 'Initial pairing reconnect limit reached. Restart bot to request a fresh code again.')
+              return
+            }
+
+            logger.warn({ reconnects: pairingState.reconnects, maxReconnects: INITIAL_PAIRING_MAX_RECONNECTS, delayMs: INITIAL_PAIRING_RECONNECT_DELAY_MS }, 'Session closed while waiting for pairing. Reconnecting to issue a fresh pairing code (use newest code only).')
+            setTimeout(() => {
+              shouldGenerateStartupPairingCode = true
+              connect().catch((error) => logger.error({ error: formatErrShort(error) }, 'Initial pairing reconnect failed'))
+            }, Math.max(1000, INITIAL_PAIRING_RECONNECT_DELAY_MS))
             return
           }
-
-          logger.warn({ reconnects: pairingState.reconnects, maxReconnects: INITIAL_PAIRING_MAX_RECONNECTS, delayMs: INITIAL_PAIRING_RECONNECT_DELAY_MS }, 'Session closed while waiting for pairing. Reconnecting to issue a fresh pairing code (use newest code only).')
-          setTimeout(() => {
-            connect().catch((error) => logger.error({ error: formatErrShort(error) }, 'Initial pairing reconnect failed'))
-          }, Math.max(1000, INITIAL_PAIRING_RECONNECT_DELAY_MS))
-          return
-        }
 
         if (AUTO_CLEAR_AUTH_ON_LOGOUT) {
           fs.rmSync(AUTH_DIR, { recursive: true, force: true })
