@@ -36,7 +36,7 @@ const AUTO_UPDATE = toBool(process.env.AUTO_UPDATE, false)
 const AUTO_UPDATE_INTERVAL_MINUTES = Number(process.env.AUTO_UPDATE_INTERVAL_MINUTES || 15)
 const AUTO_UPDATE_BRANCH = process.env.AUTO_UPDATE_BRANCH || 'main'
 const ALLOW_PAIRING_COMMAND = toBool(process.env.ALLOW_PAIRING_COMMAND, false)
-const AUTO_CLEAR_AUTH_ON_LOGOUT = toBool(process.env.AUTO_CLEAR_AUTH_ON_LOGOUT, true)
+const AUTO_CLEAR_AUTH_ON_LOGOUT = toBool(process.env.AUTO_CLEAR_AUTH_ON_LOGOUT, false)
 
 const OWNER_NUMBERS = parseNumbers(process.env.OWNER_NUMBERS)
 const AUTHORIZED_NUMBERS = Array.from(new Set([...OWNER_NUMBERS, ...parseNumbers(process.env.AUTHORIZED_NUMBERS)]))
@@ -48,6 +48,12 @@ const reminderJobs = new Map()
 const reminderMeta = new Map()
 const scheduleJobs = new Map()
 const exec = promisify(execCb)
+
+const connLogState = {
+  lastConnection: null,
+  lastCloseSig: '',
+  lastCloseAt: 0,
+}
 
 ensureJsonDb()
 ensureDir(STATUS_DIR)
@@ -164,6 +170,43 @@ function humanTs(ts = Date.now()) {
 
 function waitMs(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function connReasonLabel(code) {
+  const reasons = {
+    [DisconnectReason.loggedOut]: 'loggedOut',
+    [DisconnectReason.connectionClosed]: 'connectionClosed',
+    [DisconnectReason.connectionLost]: 'connectionLost',
+    [DisconnectReason.connectionReplaced]: 'connectionReplaced',
+    [DisconnectReason.restartRequired]: 'restartRequired',
+    [DisconnectReason.timedOut]: 'timedOut',
+    [DisconnectReason.multideviceMismatch]: 'multideviceMismatch',
+    [DisconnectReason.badSession]: 'badSession',
+  }
+  return reasons[code] || 'unknown'
+}
+
+function logConnectionTransition(connection) {
+  if (!connection || connection === connLogState.lastConnection) return
+  connLogState.lastConnection = connection
+  logger.info({ connection }, 'Connection state changed')
+}
+
+function shouldSuppressDuplicateClose(code, shouldReconnect) {
+  const sig = `${code}:${shouldReconnect}`
+  const now = Date.now()
+  const isDup = connLogState.lastCloseSig === sig && now - connLogState.lastCloseAt < 15_000
+  connLogState.lastCloseSig = sig
+  connLogState.lastCloseAt = now
+  return isDup
+}
+
+function formatErrShort(error) {
+  return {
+    name: error?.name || error?.constructor?.name || 'Error',
+    message: error?.message || 'Unknown error',
+    statusCode: new Boom(error)?.output?.statusCode || null,
+  }
 }
 
 function formatDuration(ms) {
@@ -415,6 +458,7 @@ async function connect() {
 
   let shouldGenerateStartupPairingCode = false
   let startupPairingInFlight = false
+  let awaitingInitialPairing = !state.creds?.registered
 
   async function tryGenerateStartupPairingCode() {
     if (!shouldGenerateStartupPairingCode || startupPairingInFlight) return
@@ -432,12 +476,12 @@ async function connect() {
       try {
         const code = await sock.requestPairingCode(ownerForPairing)
         shouldGenerateStartupPairingCode = false
-        logger.info({ phone: ownerForPairing, code, attempt }, 'Pairing code generated')
+        logger.info({ phone: ownerForPairing, code, attempt, maxAttempts }, 'Pairing code generated')
         break
       } catch (error) {
         const status = new Boom(error)?.output?.statusCode
         const shouldRetry = attempt < maxAttempts && [408, 428, 500, 503].includes(status)
-        logger.warn({ err: error, attempt, maxAttempts, status, shouldRetry }, 'Failed to generate startup pairing code')
+        logger.warn({ error: formatErrShort(error), attempt, maxAttempts, status, shouldRetry, retryDelayMs: shouldRetry ? 2000 : 0 }, 'Failed to generate startup pairing code')
         if (!shouldRetry) break
         await waitMs(2000)
       }
@@ -450,13 +494,16 @@ async function connect() {
     logger.info('Use WhatsApp > Linked Devices > Link with phone number only.')
     shouldGenerateStartupPairingCode = true
     setTimeout(() => {
-      tryGenerateStartupPairingCode().catch((error) => logger.warn({ err: error }, 'Startup pairing bootstrap failed'))
+      tryGenerateStartupPairingCode().catch((error) => logger.warn({ error: formatErrShort(error) }, 'Startup pairing bootstrap failed'))
     }, 1500)
   }
 
   hydrateSchedules(sock)
   setupAutoUpdate(sock)
-  sock.ev.on('creds.update', saveCreds)
+  sock.ev.on('creds.update', () => {
+    saveCreds()
+    if (state.creds?.registered) awaitingInitialPairing = false
+  })
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return
@@ -515,29 +562,38 @@ async function connect() {
   })
 
   sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
+    logConnectionTransition(connection)
+
     if (qr) {
       logger.info('QR received, but this bot is configured to prioritize phone-number pairing code.')
       if (shouldGenerateStartupPairingCode) {
-        tryGenerateStartupPairingCode().catch((error) => logger.warn({ err: error }, 'QR-triggered pairing request failed'))
+        tryGenerateStartupPairingCode().catch((error) => logger.warn({ error: formatErrShort(error) }, 'QR-triggered pairing request failed'))
       }
     }
 
     if (connection === 'open') {
-      logger.info(`${BOT_NAME} online`)
+      logger.info({ bot: BOT_NAME }, 'Bot is online')
       if (shouldGenerateStartupPairingCode) {
-        tryGenerateStartupPairingCode().catch((error) => logger.warn({ err: error }, 'Open-triggered pairing request failed'))
+        tryGenerateStartupPairingCode().catch((error) => logger.warn({ error: formatErrShort(error) }, 'Open-triggered pairing request failed'))
       }
     }
 
     if (connection === 'connecting' && shouldGenerateStartupPairingCode) {
-      tryGenerateStartupPairingCode().catch((error) => logger.warn({ err: error }, 'Connecting-triggered pairing request failed'))
+      tryGenerateStartupPairingCode().catch((error) => logger.warn({ error: formatErrShort(error) }, 'Connecting-triggered pairing request failed'))
     }
 
     if (connection === 'close') {
       const code = new Boom(lastDisconnect?.error)?.output?.statusCode
       const shouldReconnect = code !== DisconnectReason.loggedOut
-      logger.warn({ code, shouldReconnect }, 'Connection closed')
+      if (!shouldSuppressDuplicateClose(code, shouldReconnect)) {
+        logger.warn({ code, reason: connReasonLabel(code), shouldReconnect }, 'Connection closed')
+      }
       if (code === DisconnectReason.loggedOut) {
+        if (awaitingInitialPairing) {
+          logger.warn('Session closed while waiting for pairing. Keeping auth state unchanged so the last pairing code remains usable.')
+          return
+        }
+
         if (AUTO_CLEAR_AUTH_ON_LOGOUT) {
           fs.rmSync(AUTH_DIR, { recursive: true, force: true })
           logger.warn('Session logged out. Auth data cleared; attempting clean reconnect for re-linking.')
