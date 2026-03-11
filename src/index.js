@@ -511,11 +511,23 @@ async function connect() {
     for (const msg of messages) {
       try {
         if (!msg.message) continue
-        // Skip messages sent by the bot itself (echo suppression)
-        if (msg.key.fromMe) continue
 
         const chatJid = msg.key.remoteJid
-        const senderJid = jidNormalizedUser(msg.key.participant || chatJid)
+
+        // Allow fromMe messages only in self-chat (owner messaging themselves).
+        // Skip all other fromMe messages (bot's own replies to others).
+        if (msg.key.fromMe) {
+          const botJid = jidNormalizedUser(sock.user?.id || '')
+          const chatUser = jidNormalizedUser(chatJid)
+          const isSelfChat = botJid && chatUser === botJid
+          if (!isSelfChat) continue
+        }
+
+        const senderJid = jidNormalizedUser(
+          msg.key.fromMe
+            ? (sock.user?.id || msg.key.remoteJid) // self-chat: sender is the owner/bot number
+            : (msg.key.participant || chatJid)
+        )
         const senderName = msg.pushName || senderJid.split('@')[0]
         const messageText = getMessageText(msg.message)
 
