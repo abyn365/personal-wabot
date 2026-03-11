@@ -198,11 +198,11 @@ function extractViewOnce(message = {}) {
   const container = message.viewOnceMessageV2 || message.viewOnceMessage || message.viewOnceMessageV2Extension
   if (!container?.message) return null
   const inner = container.message
-  if (inner.imageMessage) return { type: 'image' }
-  if (inner.videoMessage) return { type: 'video' }
-  if (inner.audioMessage) return { type: 'audio' }
-  if (inner.documentMessage) return { type: 'document' }
-  return { type: 'unknown' }
+  if (inner.imageMessage) return { type: 'image', inner }
+  if (inner.videoMessage) return { type: 'video', inner }
+  if (inner.audioMessage) return { type: 'audio', inner }
+  if (inner.documentMessage) return { type: 'document', inner }
+  return { type: 'unknown', inner }
 }
 
 function t(key, vars = {}) {
@@ -469,6 +469,9 @@ async function connect() {
 
     if (connection === 'open') {
       logger.info({ bot: BOT_NAME }, '✅ Bot is online and ready')
+      // Send unavailable presence so WA delivers plaintext copies of our own messages
+      // This is required for self-chat (fromMe) command processing to work
+      await sock.sendPresenceUpdate('unavailable').catch(() => {})
       hydrateSchedules(sock)
       setupAutoUpdate(sock)
     }
@@ -520,7 +523,11 @@ async function connect() {
           const botJid = jidNormalizedUser(sock.user?.id || '')
           const chatUser = jidNormalizedUser(chatJid)
           const isSelfChat = botJid && chatUser === botJid
+          logger.debug({ chatJid, botJid, chatUser, isSelfChat }, 'fromMe message check')
           if (!isSelfChat) continue
+          // For self-chat, message content may not be decrypted yet.
+          // Baileys will retry — but we can still read msg.message if available.
+          if (!msg.message) continue
         }
 
         const senderJid = jidNormalizedUser(
@@ -605,7 +612,12 @@ async function handleStatusMessage(sock, msg, senderJid, senderName, text) {
   try {
     const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage })
     if (buffer?.length) {
-      const ext = msg.message?.imageMessage ? 'jpg' : msg.message?.videoMessage ? 'mp4' : msg.message?.audioMessage ? 'ogg' : 'bin'
+      // Status media may be wrapped inside imageMessage, videoMessage, etc.
+      const m = msg.message || {}
+      const ext = (m.imageMessage || m.ephemeralMessage?.message?.imageMessage) ? 'jpg'
+        : (m.videoMessage || m.ephemeralMessage?.message?.videoMessage) ? 'mp4'
+        : (m.audioMessage || m.ephemeralMessage?.message?.audioMessage) ? 'ogg'
+        : 'bin'
       savedPath = path.join(STATUS_DIR, `${prefix}.${ext}`)
       fs.writeFileSync(savedPath, buffer)
     }
@@ -637,7 +649,9 @@ async function handleAntiViewOnce(sock, msg, senderJid, senderName, viewOnce) {
   for (const jid of targets) await safeSend(sock, jid, { text: caption })
 
   try {
-    const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage })
+    // Must pass a fake msg with the inner (unwrapped) message for downloadMediaMessage to work
+    const innerMsg = { ...msg, message: viewOnce.inner }
+    const buffer = await downloadMediaMessage(innerMsg, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage })
     if (!buffer?.length) return
     const ext = viewOnce.type === 'image' ? 'jpg' : viewOnce.type === 'video' ? 'mp4' : viewOnce.type === 'audio' ? 'ogg' : 'bin'
     const fullPath = path.join(STATUS_DIR, `${fileBase}.${ext}`)
