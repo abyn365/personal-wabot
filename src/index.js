@@ -14,6 +14,8 @@ import {
 } from '@whiskeysockets/baileys'
 import { Boom } from '@hapi/boom'
 import { Sticker, StickerTypes } from 'wa-sticker-formatter'
+import { exec as execCb } from 'child_process'
+import { promisify } from 'util'
 
 const logger = P({ level: process.env.LOG_LEVEL || 'info' })
 const startTime = Date.now()
@@ -30,6 +32,10 @@ const HIDE_READ_CHAT = toBool(process.env.HIDE_READ_CHAT, true)
 const HIDE_STATUS_VIEW = toBool(process.env.HIDE_STATUS_VIEW, true)
 const FORWARD_EVENTS_TO_OWNER = toBool(process.env.FORWARD_EVENTS_TO_OWNER, true)
 const FORWARD_EVENTS_TO_AUTH_USERS = toBool(process.env.FORWARD_EVENTS_TO_AUTH_USERS, false)
+const AUTO_UPDATE = toBool(process.env.AUTO_UPDATE, false)
+const AUTO_UPDATE_INTERVAL_MINUTES = Number(process.env.AUTO_UPDATE_INTERVAL_MINUTES || 15)
+const AUTO_UPDATE_BRANCH = process.env.AUTO_UPDATE_BRANCH || 'main'
+const ALLOW_PAIRING_COMMAND = toBool(process.env.ALLOW_PAIRING_COMMAND, false)
 
 const OWNER_NUMBERS = parseNumbers(process.env.OWNER_NUMBERS)
 const AUTHORIZED_NUMBERS = Array.from(new Set([...OWNER_NUMBERS, ...parseNumbers(process.env.AUTHORIZED_NUMBERS)]))
@@ -40,6 +46,7 @@ const STATUS_FORWARD_JIDS = parseJids(process.env.STATUS_FORWARD_JIDS)
 const reminderJobs = new Map()
 const reminderMeta = new Map()
 const scheduleJobs = new Map()
+const exec = promisify(execCb)
 
 ensureJsonDb()
 ensureDir(STATUS_DIR)
@@ -61,6 +68,9 @@ function t(key, vars = {}) {
       afkOff: '✅ AFK disabled.',
       stickerReply: `Reply to an image with ${PREFIX}sticker`,
       stickerFail: 'Failed to create sticker.',
+      pairUsage: `Usage: ${PREFIX}pair 628xxxxxxxxxx`,
+      pairDisabled: 'Pair command disabled by config.',
+      pairFailed: 'Failed to request pairing code.',
     },
     id: {
       unauthorized: '⛔ Kamu tidak punya akses untuk memakai bot ini.',
@@ -77,6 +87,9 @@ function t(key, vars = {}) {
       afkOff: '✅ Mode AFK nonaktif.',
       stickerReply: `Balas gambar dengan ${PREFIX}sticker`,
       stickerFail: 'Gagal membuat stiker.',
+      pairUsage: `Contoh: ${PREFIX}pair 628xxxxxxxxxx`,
+      pairDisabled: 'Perintah pair dimatikan di konfigurasi.',
+      pairFailed: 'Gagal meminta kode pairing.',
     },
   }
   const lang = dict[BOT_LANG] ? BOT_LANG : 'en'
@@ -170,22 +183,50 @@ function parseCommand(text) {
   return { command: cmd.toLowerCase(), args: parts, fullArgs: parts.join(' ').trim() }
 }
 
-function parseDelay(input) {
-  const match = input.match(/^(\d+)([mhd])$/i)
+function parseDurationToken(token = '') {
+  const match = token.match(/^(\d+)([mhd])$/i)
   if (!match) return null
   const amount = Number(match[1])
   const unit = match[2].toLowerCase()
   const multipliers = { m: 60_000, h: 3_600_000, d: 86_400_000 }
-  const delay = amount * multipliers[unit]
-  if (delay < 10_000 || delay > 30 * 86_400_000) return null
-  return delay
+  return amount * multipliers[unit]
 }
 
-function parseReminder(input) {
-  const [delayRaw, ...msgParts] = input.split(' ')
-  const delay = parseDelay(delayRaw)
-  if (!delay || msgParts.length === 0) return null
-  return { delay, message: msgParts.join(' ') }
+function parseDateToken(token = '') {
+  const m = token.match(/^(\d{2})\/(\d{2})\/(\d{4})$/)
+  if (!m) return null
+  const day = Number(m[1])
+  const month = Number(m[2])
+  const year = Number(m[3])
+  const date = new Date(year, month - 1, day, 0, 0, 0, 0)
+  if (date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day) return null
+  return date
+}
+
+function parsePlanningTokens(parts = [], startIndex = 0) {
+  let i = startIndex
+  const date = parseDateToken(parts[i] || '')
+  if (date) i += 1
+
+  let durationMs = 0
+  while (i < parts.length) {
+    const d = parseDurationToken(parts[i])
+    if (!d) break
+    durationMs += d
+    i += 1
+  }
+
+  if (durationMs < 10_000 || durationMs > 30 * 86_400_000) return null
+  const runAt = date ? new Date(date.getTime() + durationMs).getTime() : Date.now() + durationMs
+  return { runAt, consumed: i - startIndex, durationMs, hasDate: Boolean(date) }
+}
+
+function parseReminderArgs(args = []) {
+  const plan = parsePlanningTokens(args, 0)
+  if (!plan) return null
+  const message = args.slice(plan.consumed).join(' ').trim()
+  if (!message) return null
+  return { runAt: plan.runAt, message }
 }
 
 function listItems(items, formatter) {
@@ -236,6 +277,33 @@ async function forwardEventLog(sock, title, details, extraJids = []) {
   for (const jid of targets) {
     await safeSend(sock, jid, { text: `📌 *${title}*\n${details}\nLogged: ${humanTs()}` })
   }
+}
+
+function setupAutoUpdate(sock) {
+  if (!AUTO_UPDATE) return
+  const interval = Math.max(1, AUTO_UPDATE_INTERVAL_MINUTES) * 60_000
+  setInterval(() => runAutoUpdate(sock).catch((error) => logger.warn({ err: error }, 'Auto update failed')), interval)
+  logger.info({ minutes: AUTO_UPDATE_INTERVAL_MINUTES, branch: AUTO_UPDATE_BRANCH }, 'Auto update enabled')
+}
+
+async function runAutoUpdate(sock) {
+  await exec(`git fetch origin ${AUTO_UPDATE_BRANCH}`)
+  const { stdout: local } = await exec('git rev-parse HEAD')
+  const { stdout: remote } = await exec(`git rev-parse origin/${AUTO_UPDATE_BRANCH}`)
+  if (local.trim() === remote.trim()) return
+
+  await forwardEventLog(sock, 'Auto Update', `New commit detected on origin/${AUTO_UPDATE_BRANCH}. Pulling updates...`)
+  await exec(`git pull --ff-only origin ${AUTO_UPDATE_BRANCH}`)
+  await exec('npm install')
+
+  const pm2Name = process.env.PM2_APP_NAME || ''
+  if (pm2Name) {
+    await exec(`pm2 restart ${pm2Name}`)
+    await forwardEventLog(sock, 'Auto Update', `Updated and restarted PM2 app: ${pm2Name}`)
+    return
+  }
+
+  await forwardEventLog(sock, 'Auto Update', 'Updated successfully. Restart process manually (or use PM2/systemd).')
 }
 
 function hydrateSchedules(sock) {
@@ -342,6 +410,7 @@ async function connect() {
   })
 
   hydrateSchedules(sock)
+  setupAutoUpdate(sock)
   sock.ev.on('creds.update', saveCreds)
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
@@ -525,10 +594,11 @@ async function handleCommand(sock, msg, cmd, senderJid) {
         `${PREFIX}todo add|done|list|del — manage tasks`,
         `${PREFIX}remind <time> <msg> — set reminder`,
         `${PREFIX}remind list|cancel <id> — reminder manager`,
-        `${PREFIX}schedule text <time> <jid|current> <msg> — schedule text`,
-        `${PREFIX}schedule fwd <time> <jid|current> — schedule replied media/message`,
+        `${PREFIX}schedule text <time...> <jid|current> <msg> — schedule text`,
+        `${PREFIX}schedule fwd <time...> <jid|current> — schedule replied media/message`,
         `${PREFIX}schedule list|cancel <id> — scheduler manager`,
         `${PREFIX}sticker — reply image to create sticker`,
+        `${PREFIX}pair <number> — request MD pairing code for new device`,
         `${PREFIX}quote [add <text>] — quotes`,
         `${PREFIX}auto add|list|del — auto responder rules`,
         `${PREFIX}afk on <msg>|off|status — AFK mode`,
@@ -582,6 +652,25 @@ async function handleCommand(sock, msg, cmd, senderJid) {
       await sock.sendMessage(chatJid, { sticker: stickerBuffer }, { quoted: msg })
       break
     }
+    case 'pair': {
+      if (!ALLOW_PAIRING_COMMAND) {
+        await sock.sendMessage(chatJid, { text: t('pairDisabled') }, { quoted: msg })
+        break
+      }
+      const phone = (cmd.args[0] || '').replace(/\D/g, '')
+      if (!phone) {
+        await sock.sendMessage(chatJid, { text: t('pairUsage') }, { quoted: msg })
+        break
+      }
+      try {
+        const code = await sock.requestPairingCode(phone)
+        await sock.sendMessage(chatJid, { text: `🔐 Pairing code for ${phone}: ${code}` }, { quoted: msg })
+      } catch (error) {
+        logger.warn({ err: error }, 'Pair command failed')
+        await sock.sendMessage(chatJid, { text: t('pairFailed') }, { quoted: msg })
+      }
+      break
+    }
     case 'stats': {
       const totalTodos = db.todos.length
       const completed = db.todos.filter((t) => t.done).length
@@ -623,21 +712,22 @@ async function handleReminder(sock, msg, cmd, senderJid) {
     return
   }
 
-  const parsed = parseReminder(cmd.fullArgs)
+  const parsed = parseReminderArgs(cmd.args)
   if (!parsed) {
-    await sock.sendMessage(chatJid, { text: t('usageRemind') }, { quoted: msg })
+    await sock.sendMessage(chatJid, { text: `${t('usageRemind')}\nExample: ${PREFIX}remind 1h 15m drink water\nExample: ${PREFIX}remind 11/03/2026 1h 15m pay bill` }, { quoted: msg })
     return
   }
 
   const id = `r-${Date.now().toString().slice(-6)}`
-  const runAt = Date.now() + parsed.delay
+  const runAt = parsed.runAt
+  const delay = Math.max(1000, runAt - Date.now())
   reminderMeta.set(id, { id, chatJid, message: parsed.message, runAt, by: senderJid })
 
   reminderJobs.set(id, setTimeout(async () => {
     await sock.sendMessage(chatJid, { text: `⏰ *Reminder*\n${parsed.message}\nSet by: ${senderJid.split('@')[0]}\nID: ${id}` })
     reminderJobs.delete(id)
     reminderMeta.delete(id)
-  }, parsed.delay))
+  }, delay))
 
   await sock.sendMessage(chatJid, { text: `✅ Reminder (${id}) set for ${humanTs(runAt)}` }, { quoted: msg })
 }
@@ -673,16 +763,16 @@ async function handleScheduler(sock, msg, cmd, senderJid) {
   }
 
   if (sub === 'text') {
-    const delay = parseDelay(rest[0] || '')
-    const targetJid = parseTargetJid(rest[1], chatJid)
-    const text = rest.slice(2).join(' ').trim()
-    if (!delay || !text) {
-      await sock.sendMessage(chatJid, { text: t('usageScheduleText') }, { quoted: msg })
+    const plan = parsePlanningTokens(rest, 0)
+    const targetJid = parseTargetJid(rest[plan?.consumed || 0], chatJid)
+    const text = rest.slice((plan?.consumed || 0) + 1).join(' ').trim()
+    if (!plan || !text) {
+      await sock.sendMessage(chatJid, { text: `${t('usageScheduleText')}\nExample: ${PREFIX}schedule text 1h 15m current hello\nExample: ${PREFIX}schedule text 11/03/2026 1h 15m 62812xxxx reminder` }, { quoted: msg })
       return
     }
 
     const id = `s-${Date.now().toString().slice(-7)}`
-    const runAt = Date.now() + delay
+    const runAt = plan.runAt
     const item = { id, type: 'text', targetJid, text, by: senderJid, runAt, createdAt: nowTs() }
     const db = readDb()
     db.schedules.push(item)
@@ -694,16 +784,16 @@ async function handleScheduler(sock, msg, cmd, senderJid) {
   }
 
   if (sub === 'fwd') {
-    const delay = parseDelay(rest[0] || '')
-    const targetJid = parseTargetJid(rest[1], chatJid)
+    const plan = parsePlanningTokens(rest, 0)
+    const targetJid = parseTargetJid(rest[plan?.consumed || 0], chatJid)
     const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage
-    if (!delay || !quoted) {
-      await sock.sendMessage(chatJid, { text: t('usageScheduleFwd') }, { quoted: msg })
+    if (!plan || !quoted) {
+      await sock.sendMessage(chatJid, { text: `${t('usageScheduleFwd')}\nExample: reply then ${PREFIX}schedule fwd 1h 15m current` }, { quoted: msg })
       return
     }
 
     const id = `s-${Date.now().toString().slice(-7)}`
-    const runAt = Date.now() + delay
+    const runAt = plan.runAt
     const item = { id, type: 'fwd', targetJid, quotedMessage: quoted, by: senderJid, runAt, createdAt: nowTs() }
     const db = readDb()
     db.schedules.push(item)

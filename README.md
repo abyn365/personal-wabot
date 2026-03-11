@@ -49,14 +49,15 @@ Personal WhatsApp bot built with Baileys, designed for VPS deployment with a pra
 - `!todo done <id>` — mark todo complete
 - `!todo list` — list todos
 - `!todo del <id>` — delete todo
-- `!remind <10m|2h|1d> <message>` — set reminder
+- `!remind <time plan> <message>` — set reminder (`1h 15m` or `11/03/2026 1h 15m`)
 - `!remind list` — list active reminders
 - `!remind cancel <id>` — cancel reminder
-- `!schedule text <time> <jid|current> <text>` — schedule a text message
-- `!schedule fwd <time> <jid|current>` — reply to any message, then schedule forwarding
+- `!schedule text <time plan> <jid|current> <text>` — schedule a text message
+- `!schedule fwd <time plan> <jid|current>` — reply to any message, then schedule forwarding
 - `!schedule list` — list your schedules
 - `!schedule cancel <id>` — cancel schedule
 - `!sticker` — reply an image to convert into sticker with metadata
+- `!pair <number>` — request MD pairing code for additional device/number (if enabled)
 - `!quote` — get random quote
 - `!quote add <text>` — add quote
 - `!auto add <keyword> | <response>` — add auto reply rule
@@ -66,6 +67,15 @@ Personal WhatsApp bot built with Baileys, designed for VPS deployment with a pra
 - `!afk off` — disable AFK mode
 - `!afk status` — check AFK status
 - `!stats` — summary stats
+
+## Time Planning Format
+
+All scheduling/reminder features use the same format:
+
+- `1h 15m` → execute 1 hour 15 minutes after command
+- `11/03/2026 1h 15m` → execute on 11 March 2026 at 01:15 (date at 00:00 plus duration)
+
+You can combine units like `2h 5m`, `1d 3h`, etc.
 
 ## Quick Start
 
@@ -88,7 +98,7 @@ What it does:
 - install base packages
 - install/use Node via `nvm` based on `.nvmrc`
 - install dependencies
-- create `.env` **interactively** via prompts (including language `en/id` and sticker pack metadata)
+- create `.env` **interactively** via prompts (including language `en/id`, sticker pack metadata, auto-update and pairing flags)
 - optional PM2 install + auto-start
 - run syntax check
 
@@ -107,6 +117,8 @@ See `.env.example` for full options:
 - privacy (`HIDE_ONLINE`, `HIDE_READ_CHAT`, `HIDE_STATUS_VIEW`)
 - forwarding (`EVENT_FORWARD_JIDS`, `VIEW_ONCE_FORWARD_JIDS`, `STATUS_FORWARD_JIDS`)
 - paths (`AUTH_DIR`, `DB_FILE`, `STATUS_DIR`)
+- auto update (`AUTO_UPDATE`, `AUTO_UPDATE_INTERVAL_MINUTES`, `AUTO_UPDATE_BRANCH`)
+- MD pairing command (`ALLOW_PAIRING_COMMAND`)
 
 ## VPS + systemd (recommended if not using PM2)
 
@@ -158,6 +170,7 @@ sudo journalctl -u personal-wabot -f
 
 - Reminder jobs and scheduler jobs are restored from JSON and executed by timers.
 - `schedule fwd` requires replying to a message to capture its payload.
+- Auto update runs `git fetch/pull` when enabled and can restart via PM2 if `PM2_APP_NAME` is set.
 - Keep `.env` and `data/auth` private.
 - Use dedicated WhatsApp account for automation.
 

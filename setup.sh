@@ -59,6 +59,10 @@ npm install
 PM2_INSTALL="no"
 PM2_START="no"
 PM2_APP_NAME="personal-wabot"
+AUTO_UPDATE_VALUE="no"
+AUTO_UPDATE_INTERVAL_VALUE="15"
+AUTO_UPDATE_BRANCH_VALUE="main"
+ALLOW_PAIRING_COMMAND_VALUE="no"
 
 if [[ ! -f .env ]]; then
   log "Creating .env interactively"
@@ -76,6 +80,10 @@ if [[ ! -f .env ]]; then
     EVENT_FORWARD_JIDS_VALUE="$(ask 'Extra log forwarding JIDs (comma-separated, optional)' '')"
     VIEW_ONCE_FORWARD_JIDS_VALUE="$(ask 'Extra view-once forwarding JIDs (comma-separated, optional)' '')"
     STATUS_FORWARD_JIDS_VALUE="$(ask 'Extra status forwarding JIDs (comma-separated, optional)' '')"
+    AUTO_UPDATE_VALUE="$(ask_bool 'Enable auto update (git pull when origin/main changes)? (yes/no)' 'no')"
+    AUTO_UPDATE_INTERVAL_VALUE="$(ask 'Auto update check interval minutes' '15')"
+    AUTO_UPDATE_BRANCH_VALUE="$(ask 'Auto update branch' 'main')"
+    ALLOW_PAIRING_COMMAND_VALUE="$(ask_bool 'Allow in-chat multi-device pairing command? (yes/no)' 'no')"
     PM2_INSTALL="$(ask_bool 'Install PM2 globally? (yes/no)' 'yes')"
     if [[ "$PM2_INSTALL" == "yes" ]]; then
       PM2_START="$(ask_bool 'Start bot with PM2 after setup? (yes/no)' 'yes')"
@@ -110,6 +118,10 @@ FORWARD_EVENTS_TO_AUTH_USERS=false
 EVENT_FORWARD_JIDS=${EVENT_FORWARD_JIDS_VALUE}
 VIEW_ONCE_FORWARD_JIDS=${VIEW_ONCE_FORWARD_JIDS_VALUE}
 STATUS_FORWARD_JIDS=${STATUS_FORWARD_JIDS_VALUE}
+AUTO_UPDATE=${AUTO_UPDATE_VALUE}
+AUTO_UPDATE_INTERVAL_MINUTES=${AUTO_UPDATE_INTERVAL_VALUE}
+AUTO_UPDATE_BRANCH=${AUTO_UPDATE_BRANCH_VALUE}
+ALLOW_PAIRING_COMMAND=${ALLOW_PAIRING_COMMAND_VALUE}
 EOL
 else
   log ".env already exists, leaving it unchanged"
