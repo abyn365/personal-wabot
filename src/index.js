@@ -37,6 +37,8 @@ const AUTO_UPDATE_INTERVAL_MINUTES = Number(process.env.AUTO_UPDATE_INTERVAL_MIN
 const AUTO_UPDATE_BRANCH = process.env.AUTO_UPDATE_BRANCH || 'main'
 const ALLOW_PAIRING_COMMAND = toBool(process.env.ALLOW_PAIRING_COMMAND, false)
 const AUTO_CLEAR_AUTH_ON_LOGOUT = toBool(process.env.AUTO_CLEAR_AUTH_ON_LOGOUT, false)
+const INITIAL_PAIRING_RECONNECT_DELAY_MS = Number(process.env.INITIAL_PAIRING_RECONNECT_DELAY_MS || 4000)
+const INITIAL_PAIRING_MAX_RECONNECTS = Number(process.env.INITIAL_PAIRING_MAX_RECONNECTS || 20)
 
 const OWNER_NUMBERS = parseNumbers(process.env.OWNER_NUMBERS)
 const AUTHORIZED_NUMBERS = Array.from(new Set([...OWNER_NUMBERS, ...parseNumbers(process.env.AUTHORIZED_NUMBERS)]))
@@ -53,6 +55,10 @@ const connLogState = {
   lastConnection: null,
   lastCloseSig: '',
   lastCloseAt: 0,
+}
+
+const pairingState = {
+  reconnects: 0,
 }
 
 ensureJsonDb()
@@ -572,6 +578,7 @@ async function connect() {
     }
 
     if (connection === 'open') {
+      pairingState.reconnects = 0
       logger.info({ bot: BOT_NAME }, 'Bot is online')
       if (shouldGenerateStartupPairingCode) {
         tryGenerateStartupPairingCode().catch((error) => logger.warn({ error: formatErrShort(error) }, 'Open-triggered pairing request failed'))
@@ -590,7 +597,16 @@ async function connect() {
       }
       if (code === DisconnectReason.loggedOut) {
         if (awaitingInitialPairing) {
-          logger.warn('Session closed while waiting for pairing. Keeping auth state unchanged so the last pairing code remains usable.')
+          pairingState.reconnects += 1
+          if (pairingState.reconnects > INITIAL_PAIRING_MAX_RECONNECTS) {
+            logger.error({ reconnects: pairingState.reconnects, maxReconnects: INITIAL_PAIRING_MAX_RECONNECTS }, 'Initial pairing reconnect limit reached. Restart bot to request a fresh code again.')
+            return
+          }
+
+          logger.warn({ reconnects: pairingState.reconnects, maxReconnects: INITIAL_PAIRING_MAX_RECONNECTS, delayMs: INITIAL_PAIRING_RECONNECT_DELAY_MS }, 'Session closed while waiting for pairing. Reconnecting to issue a fresh pairing code (use newest code only).')
+          setTimeout(() => {
+            connect().catch((error) => logger.error({ error: formatErrShort(error) }, 'Initial pairing reconnect failed'))
+          }, Math.max(1000, INITIAL_PAIRING_RECONNECT_DELAY_MS))
           return
         }
 
