@@ -403,11 +403,24 @@ async function connect() {
   const sock = makeWASocket({
     version,
     auth: state,
-    printQRInTerminal: true,
     logger,
     browser: ['Ubuntu', 'Chrome', '22.04'],
     markOnlineOnConnect: !HIDE_ONLINE,
   })
+
+  if (!state.creds?.registered) {
+    logger.info('WhatsApp is not linked yet.')
+    logger.info('Use WhatsApp > Linked Devices > Link with phone number (or QR).')
+
+    const ownerForPairing = OWNER_NUMBERS[0]
+    if (ownerForPairing) {
+      sock.requestPairingCode(ownerForPairing)
+        .then((code) => logger.info({ phone: ownerForPairing, code }, 'Pairing code generated'))
+        .catch((error) => logger.warn({ err: error }, 'Failed to generate startup pairing code'))
+    } else {
+      logger.warn('OWNER_NUMBERS is empty, cannot auto-generate pairing code on startup.')
+    }
+  }
 
   hydrateSchedules(sock)
   setupAutoUpdate(sock)
@@ -469,12 +482,19 @@ async function connect() {
     }
   })
 
-  sock.ev.on('connection.update', ({ connection, lastDisconnect }) => {
+  sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
+    if (qr) {
+      logger.info('QR received. If your terminal does not render QR, use phone-number pairing code instead.')
+    }
+
     if (connection === 'open') logger.info(`${BOT_NAME} online`)
     if (connection === 'close') {
       const code = new Boom(lastDisconnect?.error)?.output?.statusCode
       const shouldReconnect = code !== DisconnectReason.loggedOut
       logger.warn({ code, shouldReconnect }, 'Connection closed')
+      if (code === DisconnectReason.loggedOut) {
+        logger.warn('Session logged out. Delete auth data and re-run setup/start to login again.')
+      }
       if (shouldReconnect) connect()
     }
   })

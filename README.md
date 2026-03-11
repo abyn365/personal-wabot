@@ -85,7 +85,9 @@ cp .env.example .env
 npm start
 ```
 
-On first run, scan the QR shown in terminal.
+On first run, complete login from terminal output:
+- if available, use the printed pairing code (Linked Devices -> Link with phone number)
+- or scan QR if your terminal supports QR rendering
 
 ## Interactive VPS Setup Script
 
@@ -131,11 +133,13 @@ bash setup.sh
 nano .env
 ```
 
-2) Pair account:
+2) Pair account (`npm start`):
 
 ```bash
 npm start
 ```
+
+Then watch logs for `Pairing code generated` and enter that code in WhatsApp Linked Devices.
 
 3) Create service:
 
