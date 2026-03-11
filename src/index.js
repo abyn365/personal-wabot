@@ -11,7 +11,6 @@ import {
   downloadMediaMessage,
   generateForwardMessageContent,
   generateWAMessageFromContent,
-  makeInMemoryStore,
 } from '@whiskeysockets/baileys'
 import { Boom } from '@hapi/boom'
 import { Sticker, StickerTypes } from 'wa-sticker-formatter'
@@ -419,9 +418,10 @@ async function connect() {
 
   const needsPairing = !state.creds?.registered
 
-  // In-memory message store — lets us retrieve messages by key,
-  // which is required for self-chat (fromMe) LID message handling.
-  const msgStore = makeInMemoryStore({ logger })
+  // Simple message cache — stores messages by id so getMessage can retrieve
+  // them when Baileys needs to re-process (e.g. self-chat LID messages).
+  const msgCache = new Map()
+  const MSG_CACHE_MAX = 500
 
   const sock = makeWASocket({
     version,
@@ -431,16 +431,24 @@ async function connect() {
     markOnlineOnConnect: !HIDE_ONLINE,
     printQRInTerminal: false,
     getMessage: async (key) => {
-      const stored = await msgStore.loadMessage(key.remoteJid, key.id)
-      return stored?.message || undefined
+      return msgCache.get(key.id) || undefined
     },
   })
 
-  // Bind store to socket events so it captures all messages
-  msgStore.bind(sock.ev)
-
   // ── Credential persistence ────────────────────────────────────────────────
   sock.ev.on('creds.update', saveCreds)
+
+  // ── Message cache (for getMessage / self-chat LID support) ────────────────
+  sock.ev.on('messages.upsert', ({ messages }) => {
+    for (const msg of messages) {
+      if (!msg.key?.id || !msg.message) continue
+      msgCache.set(msg.key.id, msg.message)
+      if (msgCache.size > MSG_CACHE_MAX) {
+        // evict oldest entry
+        msgCache.delete(msgCache.keys().next().value)
+      }
+    }
+  })
 
   // ── Connection state ──────────────────────────────────────────────────────
   let pairingCodeSent = false
