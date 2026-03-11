@@ -18,6 +18,7 @@ import { exec as execCb } from 'child_process'
 import { promisify } from 'util'
 
 const logger = P({ level: process.env.LOG_LEVEL || 'info' })
+const baileysLogger = P({ level: process.env.BAILEYS_LOG_LEVEL || 'fatal' })
 const startTime = Date.now()
 
 const BOT_NAME = process.env.BOT_NAME || 'PersonalBot'
@@ -426,7 +427,7 @@ async function connect() {
   const sock = makeWASocket({
     version,
     auth: state,
-    logger,
+    logger: baileysLogger,
     browser: ['Ubuntu', 'Chrome', '22.04'],
     markOnlineOnConnect: !HIDE_ONLINE,
     printQRInTerminal: false,
