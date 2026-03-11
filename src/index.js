@@ -431,68 +431,66 @@ async function connect() {
   sock.ev.on('creds.update', saveCreds)
 
   // ── Connection state ──────────────────────────────────────────────────────
-  // Guard so we only request one pairing code per connect() call
   let pairingCodeSent = false
 
-  sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
-    // Per Baileys docs, request pairing code on 'connecting' state or when a
-    // QR event fires — that is the correct moment the socket accepts the call.
-    if (needsPairing && !pairingCodeSent && (connection === 'connecting' || !!qr)) {
-      pairingCodeSent = true
-      const ownerPhone = OWNER_NUMBERS[0]
-
-      if (!ownerPhone) {
-        logger.error('OWNER_NUMBERS is not set in .env — cannot generate pairing code.')
-      } else {
-        try {
-          const code = await sock.requestPairingCode(ownerPhone)
-          logger.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
-          logger.info(`  PAIRING CODE : ${code}`)
-          logger.info(`  Phone        : +${ownerPhone}`)
-          logger.info('  WhatsApp → Linked Devices → Link a Device')
-          logger.info('  → Link with phone number → enter the code above')
-          logger.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
-        } catch (err) {
-          logger.error({ err }, 'Failed to request pairing code — restart the bot to try again.')
-        }
-      }
-    }
-
+  sock.ev.on('connection.update', async ({ connection, lastDisconnect }) => {
     if (!connection) return
     logger.info({ connection }, 'Connection state changed')
 
     if (connection === 'open') {
       logger.info({ bot: BOT_NAME }, '✅ Bot is online and ready')
+
+      // Request pairing code here — socket is fully ready at this point.
+      // Only for fresh unregistered sessions.
+      if (needsPairing && !pairingCodeSent) {
+        pairingCodeSent = true
+        const ownerPhone = OWNER_NUMBERS[0]
+        if (!ownerPhone) {
+          logger.error('OWNER_NUMBERS not set — cannot generate pairing code.')
+        } else {
+          try {
+            const code = await sock.requestPairingCode(ownerPhone)
+            logger.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
+            logger.info(`  PAIRING CODE : ${code}`)
+            logger.info(`  Phone        : +${ownerPhone}`)
+            logger.info('  WhatsApp → Linked Devices → Link a Device')
+            logger.info('  → Link with phone number → enter the code above')
+            logger.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
+          } catch (err) {
+            logger.error({ err }, 'Failed to request pairing code.')
+          }
+        }
+      }
+
       hydrateSchedules(sock)
       setupAutoUpdate(sock)
     }
 
     if (connection === 'close') {
       const boom = new Boom(lastDisconnect?.error)
-      const code = boom?.output?.statusCode
-      const reason = Object.entries(DisconnectReason).find(([, v]) => v === code)?.[0] ?? 'unknown'
+      const statusCode = boom?.output?.statusCode
+      const reason = Object.entries(DisconnectReason).find(([, v]) => v === statusCode)?.[0] ?? 'unknown'
+      logger.warn({ code: statusCode, reason }, 'Connection closed')
 
-      logger.warn({ code, reason }, 'Connection closed')
-
-      if (code === DisconnectReason.loggedOut) {
-        logger.warn('Session logged out (401). Clearing auth and reconnecting for fresh pairing...')
+      if (statusCode === DisconnectReason.loggedOut) {
+        // 401: session rejected by WA. Clear auth so next startup is fresh.
+        // Exit cleanly — the wrapper loop below will restart the process.
+        logger.warn('Session logged out (401). Clearing auth data. Process will restart...')
         clearAuthDir()
-        setTimeout(() => connect(), 3000)
-        return
+        process.exit(2) // exit code 2 = restart needed
       }
 
-      if (code === DisconnectReason.connectionReplaced) {
-        logger.warn('Connection replaced by another session. Not reconnecting.')
-        return
+      if (statusCode === DisconnectReason.connectionReplaced) {
+        logger.warn('Connection replaced. Not reconnecting.')
+        process.exit(0)
       }
 
-      // restartRequired = WA forcing reconnect after a successful pairing scan
-      if (code === DisconnectReason.restartRequired) {
-        logger.info('Restart required (normal after pairing scan). Reconnecting...')
-        setTimeout(() => connect(), 1000)
-        return
+      if (statusCode === DisconnectReason.restartRequired) {
+        logger.info('Restart required after pairing — restarting process...')
+        process.exit(2)
       }
 
+      // All other errors: reconnect within the same process
       logger.info('Reconnecting in 5s...')
       setTimeout(() => connect(), 5000)
     }
@@ -1026,8 +1024,36 @@ async function handleQuote(sock, msg, cmd, db) {
 }
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
+// connect() uses process.exit(2) to signal "restart needed" (after 401 / restartRequired).
+// This loop catches that and re-runs connect() in the same process, giving a clean
+// fresh auth state each time without leaking old socket event listeners.
 
-connect().catch((error) => {
-  logger.error({ err: error }, 'Fatal start error')
-  process.exit(1)
-})
+async function main() {
+  while (true) {
+    const exitCode = await new Promise((resolve) => {
+      // Override process.exit so we can catch it instead of actually exiting
+      // when called from within connect()'s event handlers.
+      const origExit = process.exit.bind(process)
+      process.exit = (code) => {
+        process.exit = origExit // restore
+        resolve(code ?? 0)
+      }
+      connect().catch((err) => {
+        process.exit = process.exit.bind(process) // restore if connect() throws before exit
+        logger.error({ err }, 'Fatal connect() error')
+        resolve(1)
+      })
+    })
+
+    if (exitCode === 2) {
+      logger.info('Restarting bot in 4s...')
+      await waitMs(4000)
+      continue
+    }
+
+    // exit code 0 or 1 = done, actually exit
+    process.exit(exitCode)
+  }
+}
+
+main()
