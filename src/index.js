@@ -13,6 +13,7 @@ import {
 import { Boom } from '@hapi/boom'
 
 const logger = P({ level: process.env.LOG_LEVEL || 'info' })
+const startTime = Date.now()
 
 const BOT_NAME = process.env.BOT_NAME || 'PersonalBot'
 const PREFIX = process.env.BOT_PREFIX || '!'
@@ -34,6 +35,7 @@ const STATUS_FORWARD_JIDS = parseJids(process.env.STATUS_FORWARD_JIDS)
 ensureJsonDb()
 ensureDir(STATUS_DIR)
 const reminderJobs = new Map()
+const reminderMeta = new Map()
 
 function toBool(value, defaultValue = false) {
   if (value === undefined) return defaultValue
@@ -41,10 +43,7 @@ function toBool(value, defaultValue = false) {
 }
 
 function parseNumbers(raw = '') {
-  return raw
-    .split(',')
-    .map((x) => x.trim().replace(/\+/g, ''))
-    .filter(Boolean)
+  return raw.split(',').map((x) => x.trim().replace(/\+/g, '')).filter(Boolean)
 }
 
 function parseJids(raw = '') {
@@ -72,13 +71,16 @@ function ensureJsonDb() {
         'Small consistent actions beat occasional intensity.',
         'Document your life so future you can win faster.',
       ],
+      afk: { enabled: false, message: 'I am currently AFK.', since: null, by: null },
     }
     fs.writeFileSync(DB_FILE, JSON.stringify(seed, null, 2))
   }
 }
 
 function readDb() {
-  return JSON.parse(fs.readFileSync(DB_FILE, 'utf8'))
+  const db = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'))
+  if (!db.afk) db.afk = { enabled: false, message: 'I am currently AFK.', since: null, by: null }
+  return db
 }
 
 function writeDb(data) {
@@ -91,6 +93,15 @@ function nowTs() {
 
 function humanTs(ts = Date.now()) {
   return new Date(ts).toLocaleString()
+}
+
+function formatDuration(ms) {
+  const s = Math.floor(ms / 1000)
+  const d = Math.floor(s / 86400)
+  const h = Math.floor((s % 86400) / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  const sec = s % 60
+  return `${d}d ${h}h ${m}m ${sec}s`
 }
 
 function isAuthorized(senderJid) {
@@ -136,18 +147,16 @@ function extractViewOnce(message = {}) {
   const container = message.viewOnceMessageV2 || message.viewOnceMessage || message.viewOnceMessageV2Extension
   if (!container?.message) return null
   const inner = container.message
-  if (inner.imageMessage) return { type: 'image', content: inner.imageMessage }
-  if (inner.videoMessage) return { type: 'video', content: inner.videoMessage }
-  if (inner.audioMessage) return { type: 'audio', content: inner.audioMessage }
-  if (inner.documentMessage) return { type: 'document', content: inner.documentMessage }
-  return { type: 'unknown', content: inner }
+  if (inner.imageMessage) return { type: 'image' }
+  if (inner.videoMessage) return { type: 'video' }
+  if (inner.audioMessage) return { type: 'audio' }
+  if (inner.documentMessage) return { type: 'document' }
+  return { type: 'unknown' }
 }
 
 function createEventDestinations() {
   const fromOwners = FORWARD_EVENTS_TO_OWNER ? OWNER_NUMBERS.map((n) => `${n}@s.whatsapp.net`) : []
-  const fromAuthorized = FORWARD_EVENTS_TO_AUTH_USERS
-    ? AUTHORIZED_NUMBERS.map((n) => `${n}@s.whatsapp.net`)
-    : []
+  const fromAuthorized = FORWARD_EVENTS_TO_AUTH_USERS ? AUTHORIZED_NUMBERS.map((n) => `${n}@s.whatsapp.net`) : []
   return Array.from(new Set([...fromOwners, ...fromAuthorized, ...EVENT_FORWARD_JIDS]))
 }
 
@@ -170,7 +179,7 @@ async function safeSend(sock, jid, payload, options) {
 async function forwardEventLog(sock, title, details, extraJids = []) {
   const targets = Array.from(new Set([...createEventDestinations(), ...extraJids]))
   if (!targets.length) return
-  const body = `📌 *${title}*\n${details}\nAt: ${humanTs()}`
+  const body = `📌 *${title}*\n${details}\nLogged: ${humanTs()}`
   for (const jid of targets) {
     await safeSend(sock, jid, { text: body })
   }
@@ -217,9 +226,7 @@ async function connect() {
         trackMessageForDelete(msg, senderName)
 
         const viewOnce = extractViewOnce(msg.message)
-        if (viewOnce) {
-          await handleAntiViewOnce(sock, msg, senderJid, senderName, viewOnce)
-        }
+        if (viewOnce) await handleAntiViewOnce(sock, msg, senderJid, senderName, viewOnce)
 
         const cmd = parseCommand(messageText)
         if (cmd) {
@@ -231,6 +238,7 @@ async function connect() {
           continue
         }
 
+        await maybeAfkReply(sock, msg, senderJid)
         await maybeAutoRespond(sock, msg, messageText)
       } catch (error) {
         logger.error({ err: error }, 'Error handling incoming message')
@@ -277,16 +285,12 @@ function trackMessageForDelete(msg, senderName) {
 }
 
 async function handleStatusMessage(sock, msg, senderJid, senderName, text) {
-  if (!HIDE_STATUS_VIEW) {
-    await sock.readMessages([msg.key])
-  }
+  if (!HIDE_STATUS_VIEW) await sock.readMessages([msg.key])
 
   const stamp = msg.messageTimestamp ? Number(msg.messageTimestamp) * 1000 : Date.now()
   const prefix = `${senderJid.split('@')[0]}_${stamp}`
-  const viewOnce = extractViewOnce(msg.message)
-  const mediaTarget = viewOnce ? { message: { ...msg.message, ...viewOnce.content }, key: msg.key } : msg
-
   let savedPath = ''
+
   try {
     const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage })
     if (buffer?.length) {
@@ -301,11 +305,15 @@ async function handleStatusMessage(sock, msg, senderJid, senderName, text) {
   const details = `From: ${senderName} (${senderJid})\nText: ${text || '_No text_'}\nSaved: ${savedPath || 'none'}\nTime: ${humanTs(stamp)}`
   await forwardEventLog(sock, 'Status Saved', details, createStatusDestinations())
 
-  if (savedPath) {
-    const targets = createStatusDestinations()
-    for (const jid of targets) {
-      await safeSend(sock, jid, { document: fs.readFileSync(savedPath), fileName: path.basename(savedPath), mimetype: 'application/octet-stream', caption: `📥 Status file from ${senderName}\n${humanTs(stamp)}` })
-    }
+  if (!savedPath) return
+  const targets = createStatusDestinations()
+  for (const jid of targets) {
+    await safeSend(sock, jid, {
+      document: fs.readFileSync(savedPath),
+      fileName: path.basename(savedPath),
+      mimetype: 'application/octet-stream',
+      caption: `📥 Status from ${senderName}\n${humanTs(stamp)}`,
+    })
   }
 }
 
@@ -315,9 +323,7 @@ async function handleAntiViewOnce(sock, msg, senderJid, senderName, viewOnce) {
   const targets = createViewOnceDestinations()
   const caption = `👁️ *Anti View-Once Captured*\nFrom: ${senderName} (${senderJid})\nType: ${viewOnce.type}\nTime: ${humanTs(stamp)}`
 
-  for (const jid of targets) {
-    await safeSend(sock, jid, { text: caption })
-  }
+  for (const jid of targets) await safeSend(sock, jid, { text: caption })
 
   try {
     const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage })
@@ -339,6 +345,20 @@ async function handleAntiViewOnce(sock, msg, senderJid, senderName, viewOnce) {
   }
 }
 
+async function maybeAfkReply(sock, msg, senderJid) {
+  if (isAuthorized(senderJid)) return
+  const db = readDb()
+  if (!db.afk?.enabled) return
+
+  await sock.sendMessage(
+    msg.key.remoteJid,
+    {
+      text: `🛌 AFK Notice\n${db.afk.message}\nSince: ${db.afk.since || 'unknown'}\nBy: ${db.afk.by || 'owner'}`,
+    },
+    { quoted: msg }
+  )
+}
+
 async function maybeAutoRespond(sock, msg, text) {
   if (!text) return
   const db = readDb()
@@ -356,22 +376,40 @@ async function handleCommand(sock, msg, cmd, senderJid) {
   const db = readDb()
 
   switch (cmd.command) {
-    case 'help':
-      await sock.sendMessage(chatJid, {
-        text:
-          `*${BOT_NAME} Commands*\n\n` +
-          `${PREFIX}help\n${PREFIX}ping\n${PREFIX}echo <text>\n` +
-          `${PREFIX}note add|list|del\n${PREFIX}todo add|done|list|del\n` +
-          `${PREFIX}remind <10m|2h|1d> <message>\n${PREFIX}quote [add]\n` +
-          `${PREFIX}auto add|list|del\n${PREFIX}stats\n` +
-          `${PREFIX}whoami`,
-      }, { quoted: msg })
+    case 'help': {
+      const helpText = [
+        `*${BOT_NAME} Command Guide*`,
+        '',
+        `${PREFIX}help — show this command overview with descriptions`,
+        `${PREFIX}ping — quick health check`,
+        `${PREFIX}whoami — return your WhatsApp JID`,
+        `${PREFIX}chatid — return current chat JID`,
+        `${PREFIX}uptime — show bot uptime since last start`,
+        `${PREFIX}echo <text> — repeat your text`,
+        `${PREFIX}note add|list|find|del — manage personal notes`,
+        `${PREFIX}todo add|done|list|del — manage tasks`,
+        `${PREFIX}remind <time> <msg> — create reminder (10m,2h,1d)`,
+        `${PREFIX}remind list — list active reminders`,
+        `${PREFIX}remind cancel <id> — cancel a reminder`,
+        `${PREFIX}quote [add <text>] — get or save quotes`,
+        `${PREFIX}auto add|list|del — keyword auto-response rules`,
+        `${PREFIX}afk on <msg>|off|status — AFK auto-reply mode`,
+        `${PREFIX}stats — show bot usage stats`,
+      ].join('\n')
+      await sock.sendMessage(chatJid, { text: helpText }, { quoted: msg })
       break
+    }
     case 'ping':
       await sock.sendMessage(chatJid, { text: '🏓 pong' }, { quoted: msg })
       break
     case 'whoami':
       await sock.sendMessage(chatJid, { text: `You: ${senderJid}` }, { quoted: msg })
+      break
+    case 'chatid':
+      await sock.sendMessage(chatJid, { text: `Chat ID: ${chatJid}` }, { quoted: msg })
+      break
+    case 'uptime':
+      await sock.sendMessage(chatJid, { text: `⏱️ Uptime: ${formatDuration(Date.now() - startTime)}` }, { quoted: msg })
       break
     case 'echo':
       await sock.sendMessage(chatJid, { text: cmd.fullArgs || '_Nothing to echo._' }, { quoted: msg })
@@ -388,21 +426,12 @@ async function handleCommand(sock, msg, cmd, senderJid) {
     case 'quote':
       await handleQuote(sock, msg, cmd, db)
       break
-    case 'remind': {
-      const parsed = parseReminder(cmd.fullArgs)
-      if (!parsed) {
-        await sock.sendMessage(chatJid, { text: `Usage: ${PREFIX}remind 10m review backup` }, { quoted: msg })
-        break
-      }
-      const id = `r-${Date.now()}`
-      const runAt = Date.now() + parsed.delay
-      reminderJobs.set(id, setTimeout(async () => {
-        await sock.sendMessage(chatJid, { text: `⏰ *Reminder*\n${parsed.message}\nSet by: ${senderJid.split('@')[0]}` })
-        reminderJobs.delete(id)
-      }, parsed.delay))
-      await sock.sendMessage(chatJid, { text: `✅ Reminder set for ${humanTs(runAt)}` }, { quoted: msg })
+    case 'afk':
+      await handleAfk(sock, msg, cmd, db, senderJid)
       break
-    }
+    case 'remind':
+      await handleReminder(sock, msg, cmd, senderJid)
+      break
     case 'stats': {
       const totalTodos = db.todos.length
       const completed = db.todos.filter((t) => t.done).length
@@ -411,7 +440,8 @@ async function handleCommand(sock, msg, cmd, senderJid) {
           `📊 *Stats*\n` +
           `Notes: ${db.notes.length}\nTodos: ${totalTodos} (✅ ${completed} / 🕒 ${totalTodos - completed})\n` +
           `Auto rules: ${Object.keys(db.autoresponders).length}\nQuotes: ${db.quotes.length}\n` +
-          `Reminders: ${reminderJobs.size}\nAuthorized users: ${AUTHORIZED_NUMBERS.length || 'unrestricted'}`,
+          `Reminders: ${reminderJobs.size}\nAuthorized users: ${AUTHORIZED_NUMBERS.length || 'unrestricted'}\n` +
+          `AFK: ${db.afk?.enabled ? `on (${db.afk.since})` : 'off'}`,
       }, { quoted: msg })
       break
     }
@@ -420,9 +450,87 @@ async function handleCommand(sock, msg, cmd, senderJid) {
   }
 }
 
+async function handleReminder(sock, msg, cmd, senderJid) {
+  const chatJid = msg.key.remoteJid
+  const [sub, ...rest] = cmd.args
+
+  if (sub === 'list') {
+    const mine = Array.from(reminderMeta.values()).filter((r) => r.chatJid === chatJid)
+    const out = listItems(mine, (r) => `${r.id} • ${humanTs(r.runAt)} • ${r.message}`)
+    await sock.sendMessage(chatJid, { text: `⏰ *Active Reminders*\n${out}` }, { quoted: msg })
+    return
+  }
+
+  if (sub === 'cancel') {
+    const id = rest[0]
+    if (!id || !reminderJobs.has(id)) {
+      await sock.sendMessage(chatJid, { text: 'Reminder ID not found.' }, { quoted: msg })
+      return
+    }
+    clearTimeout(reminderJobs.get(id))
+    reminderJobs.delete(id)
+    reminderMeta.delete(id)
+    await sock.sendMessage(chatJid, { text: `🗑️ Reminder ${id} cancelled.` }, { quoted: msg })
+    return
+  }
+
+  const parsed = parseReminder(cmd.fullArgs)
+  if (!parsed) {
+    await sock.sendMessage(chatJid, { text: `Usage: ${PREFIX}remind 10m review backup` }, { quoted: msg })
+    return
+  }
+
+  const id = `r-${Date.now().toString().slice(-6)}`
+  const runAt = Date.now() + parsed.delay
+  reminderMeta.set(id, { id, chatJid, message: parsed.message, runAt, by: senderJid })
+
+  reminderJobs.set(
+    id,
+    setTimeout(async () => {
+      await sock.sendMessage(chatJid, { text: `⏰ *Reminder*\n${parsed.message}\nSet by: ${senderJid.split('@')[0]}\nID: ${id}` })
+      reminderJobs.delete(id)
+      reminderMeta.delete(id)
+    }, parsed.delay)
+  )
+
+  await sock.sendMessage(chatJid, { text: `✅ Reminder (${id}) set for ${humanTs(runAt)}` }, { quoted: msg })
+}
+
+async function handleAfk(sock, msg, cmd, db, senderJid) {
+  const chatJid = msg.key.remoteJid
+  const [sub, ...rest] = cmd.args
+
+  if (sub === 'on') {
+    const message = rest.join(' ').trim() || 'I am currently AFK. I will reply later.'
+    db.afk = { enabled: true, message, since: humanTs(), by: senderJid }
+    writeDb(db)
+    await sock.sendMessage(chatJid, { text: '✅ AFK enabled.' }, { quoted: msg })
+    return
+  }
+
+  if (sub === 'off') {
+    db.afk = { enabled: false, message: 'I am currently AFK.', since: null, by: senderJid }
+    writeDb(db)
+    await sock.sendMessage(chatJid, { text: '✅ AFK disabled.' }, { quoted: msg })
+    return
+  }
+
+  if (sub === 'status') {
+    await sock.sendMessage(chatJid, {
+      text: db.afk?.enabled
+        ? `🛌 AFK is ON\nMessage: ${db.afk.message}\nSince: ${db.afk.since}\nBy: ${db.afk.by}`
+        : '🟢 AFK is OFF',
+    }, { quoted: msg })
+    return
+  }
+
+  await sock.sendMessage(chatJid, { text: `Usage: ${PREFIX}afk on <msg> | ${PREFIX}afk off | ${PREFIX}afk status` }, { quoted: msg })
+}
+
 async function handleNote(sock, msg, cmd, db) {
   const [sub, ...rest] = cmd.args
   const chatJid = msg.key.remoteJid
+
   if (sub === 'add') {
     const text = rest.join(' ').trim()
     if (!text) return sock.sendMessage(chatJid, { text: `Usage: ${PREFIX}note add buy groceries` }, { quoted: msg })
@@ -431,7 +539,18 @@ async function handleNote(sock, msg, cmd, db) {
     writeDb(db)
     return sock.sendMessage(chatJid, { text: `📝 Saved note #${id}` }, { quoted: msg })
   }
-  if (sub === 'list') return sock.sendMessage(chatJid, { text: `🗒️ *Notes*\n${listItems(db.notes, (n) => `#${n.id} • ${n.text}`)}` }, { quoted: msg })
+
+  if (sub === 'list') {
+    return sock.sendMessage(chatJid, { text: `🗒️ *Notes*\n${listItems(db.notes, (n) => `#${n.id} • ${n.text}`)}` }, { quoted: msg })
+  }
+
+  if (sub === 'find') {
+    const keyword = rest.join(' ').trim().toLowerCase()
+    if (!keyword) return sock.sendMessage(chatJid, { text: `Usage: ${PREFIX}note find grocery` }, { quoted: msg })
+    const rows = db.notes.filter((n) => n.text.toLowerCase().includes(keyword))
+    return sock.sendMessage(chatJid, { text: `🔎 *Note Search*\n${listItems(rows, (n) => `#${n.id} • ${n.text}`)}` }, { quoted: msg })
+  }
+
   if (sub === 'del') {
     const id = Number(rest[0])
     const next = db.notes.filter((n) => n.id !== id)
@@ -440,7 +559,8 @@ async function handleNote(sock, msg, cmd, db) {
     writeDb(db)
     return sock.sendMessage(chatJid, { text: `🗑️ Deleted note #${id}` }, { quoted: msg })
   }
-  return sock.sendMessage(chatJid, { text: `Usage: ${PREFIX}note add|list|del` }, { quoted: msg })
+
+  return sock.sendMessage(chatJid, { text: `Usage: ${PREFIX}note add|list|find|del` }, { quoted: msg })
 }
 
 async function handleTodo(sock, msg, cmd, db) {
@@ -461,7 +581,9 @@ async function handleTodo(sock, msg, cmd, db) {
     writeDb(db)
     return sock.sendMessage(chatJid, { text: `🎉 Task #${found.id} marked done` }, { quoted: msg })
   }
-  if (sub === 'list') return sock.sendMessage(chatJid, { text: `📌 *Todos*\n${listItems(db.todos, (t) => `${t.done ? '✅' : '🕒'} #${t.id} • ${t.text}`)}` }, { quoted: msg })
+  if (sub === 'list') {
+    return sock.sendMessage(chatJid, { text: `📌 *Todos*\n${listItems(db.todos, (t) => `${t.done ? '✅' : '🕒'} #${t.id} • ${t.text}`)}` }, { quoted: msg })
+  }
   if (sub === 'del') {
     const id = Number(rest[0])
     const next = db.todos.filter((t) => t.id !== id)

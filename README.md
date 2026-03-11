@@ -1,48 +1,60 @@
 # Personal WhatsApp Bot (Baileys)
 
-A practical **personal-use** WhatsApp bot built with Baileys, inspired by feature-rich bots (like Levanter-style utility packs) but kept simple to deploy on a VPS.
+Personal WhatsApp bot built with Baileys, designed for VPS deployment with a practical command set and event logging tools.
 
 ## Main Features
 
 - Owner + authorized-user command access
-- Productivity tools:
-  - `!note add/list/del`
-  - `!todo add/done/list/del`
-  - `!remind 10m message`
-  - `!quote`, `!quote add`
+- Productivity toolkit:
+  - notes (`add/list/find/del`)
+  - todos (`add/done/list/del`)
+  - reminders (`create/list/cancel`)
+  - quotes (`random/add`)
+- Utility commands:
+  - chat id lookup
+  - uptime
+  - whoami
+- AFK mode with auto notice reply for non-authorized chats
 - Automation:
-  - `!auto add/list/del` keyword responses
-- Privacy/event tooling:
-  - Deleted message log + forwarding
-  - Anti view-once capture (auto forward media + metadata)
-  - Status saver (save status media from contacts + forward to selected chats)
-- Privacy toggles from `.env`:
+  - keyword auto responders
+- Monitoring/logging:
+  - deleted-message details with forwarding
+  - anti view-once capture + forwarding
+  - status saver (save + forward)
+- Privacy controls from `.env`:
   - hide online
   - hide chat read receipts
   - hide status viewed receipts
-- VPS-ready with `systemd`
-- Auto Node.js alignment with `nvm` via `setup.sh`
+- Auto Node version alignment via `nvm`
 
-## Commands
+## Command Overview
 
-- `!help`
-- `!ping`
-- `!whoami`
-- `!echo <text>`
-- `!note add <text>`
-- `!note list`
-- `!note del <id>`
-- `!todo add <text>`
-- `!todo done <id>`
-- `!todo list`
-- `!todo del <id>`
-- `!remind <10m|2h|1d> <message>`
-- `!quote`
-- `!quote add <text>`
-- `!auto add <keyword> | <response>`
-- `!auto list`
-- `!auto del <keyword>`
-- `!stats`
+- `!help` — show all commands with descriptions
+- `!ping` — quick health check
+- `!whoami` — show your sender JID
+- `!chatid` — show current chat JID
+- `!uptime` — show current bot uptime
+- `!echo <text>` — repeat text
+- `!note add <text>` — add note
+- `!note list` — list notes
+- `!note find <keyword>` — search notes
+- `!note del <id>` — delete note
+- `!todo add <text>` — add todo item
+- `!todo done <id>` — mark todo complete
+- `!todo list` — list todos
+- `!todo del <id>` — delete todo
+- `!remind <10m|2h|1d> <message>` — set reminder
+- `!remind list` — list active reminders
+- `!remind cancel <id>` — cancel reminder
+- `!quote` — get random quote
+- `!quote add <text>` — add quote
+- `!auto add <keyword> | <response>` — add auto reply rule
+- `!auto list` — list auto reply rules
+- `!auto del <keyword>` — delete auto reply rule
+- `!afk on <message>` — enable AFK mode
+- `!afk off` — disable AFK mode
+- `!afk status` — check AFK status
+- `!stats` — summary stats
 
 ## Quick Start
 
@@ -52,58 +64,39 @@ cp .env.example .env
 npm start
 ```
 
-Scan QR from terminal on first run.
+On first run, scan the QR shown in terminal.
 
-## One-shot Setup Script (recommended)
-
-Use the provided raw bash setup script. It will:
-- clone repo (if not already in repo)
-- install base packages (Ubuntu)
-- install/use correct Node version via `nvm`
-- install dependencies
-- create `.env` if missing
-- run syntax check
+## Interactive VPS Setup Script
 
 ```bash
 bash setup.sh
 ```
 
-You can also run it from raw URL on VPS:
+What it does:
+- clone repo (if needed)
+- install base packages
+- install/use Node via `nvm` based on `.nvmrc`
+- install dependencies
+- create `.env` **interactively** via prompts
+- run syntax check
+
+Raw script usage:
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/abyn365/personal-wabot/main/setup.sh)
 ```
 
-Optional overrides:
-
-```bash
-REPO_URL=https://github.com/abyn365/personal-wabot TARGET_DIR=personal-wabot NODE_VERSION=20 bash setup.sh
-```
-
 ## Environment Variables
 
-| Variable | Description |
-|---|---|
-| `BOT_NAME` | Bot name in help menu |
-| `BOT_PREFIX` | Command prefix |
-| `OWNER_NUMBERS` | Comma-separated owners (international format, no `+`) |
-| `AUTHORIZED_NUMBERS` | Additional numbers allowed to use commands |
-| `LOG_LEVEL` | pino log level |
-| `AUTH_DIR` | Baileys auth state path |
-| `DB_FILE` | JSON datastore path |
-| `STATUS_DIR` | Saved status/view-once media path |
-| `HIDE_ONLINE` | Keep bot presence hidden on connect |
-| `HIDE_READ_CHAT` | Disable automatic read receipts in chats |
-| `HIDE_STATUS_VIEW` | Disable status viewed receipts |
-| `FORWARD_EVENTS_TO_OWNER` | Forward logs/events to owners |
-| `FORWARD_EVENTS_TO_AUTH_USERS` | Forward logs/events to authorized users |
-| `EVENT_FORWARD_JIDS` | Extra chats/JIDs for event logs |
-| `VIEW_ONCE_FORWARD_JIDS` | Extra chats/JIDs for anti-view-once captures |
-| `STATUS_FORWARD_JIDS` | Extra chats/JIDs for status saver outputs |
+See `.env.example` for full options:
+- auth/access (`OWNER_NUMBERS`, `AUTHORIZED_NUMBERS`)
+- privacy (`HIDE_ONLINE`, `HIDE_READ_CHAT`, `HIDE_STATUS_VIEW`)
+- forwarding (`EVENT_FORWARD_JIDS`, `VIEW_ONCE_FORWARD_JIDS`, `STATUS_FORWARD_JIDS`)
+- paths (`AUTH_DIR`, `DB_FILE`, `STATUS_DIR`)
 
-## VPS Deployment (Ubuntu + systemd)
+## VPS + systemd
 
-### 1. Setup app
+1) Prepare and configure:
 
 ```bash
 git clone https://github.com/abyn365/personal-wabot
@@ -112,19 +105,13 @@ bash setup.sh
 nano .env
 ```
 
-### 2. Pair bot account
+2) Pair account:
 
 ```bash
 npm start
 ```
 
-Scan QR, then stop with `Ctrl + C`.
-
-### 3. Create systemd service
-
-```bash
-sudo nano /etc/systemd/system/personal-wabot.service
-```
+3) Create service:
 
 ```ini
 [Unit]
@@ -144,25 +131,17 @@ Environment=NODE_ENV=production
 WantedBy=multi-user.target
 ```
 
-Enable/start:
+4) Enable service:
 
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable personal-wabot
 sudo systemctl start personal-wabot
-sudo systemctl status personal-wabot
-```
-
-### 4. Logs and maintenance
-
-```bash
 sudo journalctl -u personal-wabot -f
-sudo systemctl restart personal-wabot
 ```
 
-## Important Notes
+## Notes
 
-- Anti view-once and status saver work best for media statuses/messages.
-- Reminder jobs are in-memory (cleared on restart).
+- Reminder jobs are in-memory and reset on restart.
 - Keep `.env` and `data/auth` private.
-- Prefer using a dedicated WhatsApp account for automation.
+- Use dedicated WhatsApp account for automation.
