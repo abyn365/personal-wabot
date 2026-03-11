@@ -86,8 +86,8 @@ npm start
 ```
 
 On first run, complete login from terminal output:
-- if available, use the printed pairing code (Linked Devices -> Link with phone number)
-- or scan QR if your terminal supports QR rendering
+- use the printed pairing code (Linked Devices -> Link with phone number)
+- ensure `OWNER_NUMBERS` is set correctly, because startup pairing code is sent for the first owner number
 
 ## Interactive VPS Setup Script
 

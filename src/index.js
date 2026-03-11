@@ -162,6 +162,10 @@ function humanTs(ts = Date.now()) {
   return new Date(ts).toLocaleString()
 }
 
+function waitMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
 function formatDuration(ms) {
   const s = Math.floor(ms / 1000)
   const d = Math.floor(s / 86400)
@@ -410,11 +414,44 @@ async function connect() {
   })
 
   let shouldGenerateStartupPairingCode = false
+  let startupPairingInFlight = false
+
+  async function tryGenerateStartupPairingCode() {
+    if (!shouldGenerateStartupPairingCode || startupPairingInFlight) return
+
+    const ownerForPairing = OWNER_NUMBERS[0]
+    if (!ownerForPairing) {
+      shouldGenerateStartupPairingCode = false
+      logger.warn('OWNER_NUMBERS is empty, cannot auto-generate pairing code on startup.')
+      return
+    }
+
+    startupPairingInFlight = true
+    const maxAttempts = 6
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        const code = await sock.requestPairingCode(ownerForPairing)
+        shouldGenerateStartupPairingCode = false
+        logger.info({ phone: ownerForPairing, code, attempt }, 'Pairing code generated')
+        break
+      } catch (error) {
+        const status = new Boom(error)?.output?.statusCode
+        const shouldRetry = attempt < maxAttempts && [408, 428, 500, 503].includes(status)
+        logger.warn({ err: error, attempt, maxAttempts, status, shouldRetry }, 'Failed to generate startup pairing code')
+        if (!shouldRetry) break
+        await waitMs(2000)
+      }
+    }
+    startupPairingInFlight = false
+  }
 
   if (!state.creds?.registered) {
     logger.info('WhatsApp is not linked yet.')
-    logger.info('Use WhatsApp > Linked Devices > Link with phone number (or QR).')
+    logger.info('Use WhatsApp > Linked Devices > Link with phone number only.')
     shouldGenerateStartupPairingCode = true
+    setTimeout(() => {
+      tryGenerateStartupPairingCode().catch((error) => logger.warn({ err: error }, 'Startup pairing bootstrap failed'))
+    }, 1500)
   }
 
   hydrateSchedules(sock)
@@ -479,23 +516,21 @@ async function connect() {
 
   sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
     if (qr) {
-      logger.info('QR received. If your terminal does not render QR, use phone-number pairing code instead.')
+      logger.info('QR received, but this bot is configured to prioritize phone-number pairing code.')
+      if (shouldGenerateStartupPairingCode) {
+        tryGenerateStartupPairingCode().catch((error) => logger.warn({ err: error }, 'QR-triggered pairing request failed'))
+      }
     }
 
     if (connection === 'open') {
       logger.info(`${BOT_NAME} online`)
-
       if (shouldGenerateStartupPairingCode) {
-        shouldGenerateStartupPairingCode = false
-        const ownerForPairing = OWNER_NUMBERS[0]
-        if (ownerForPairing) {
-          sock.requestPairingCode(ownerForPairing)
-            .then((code) => logger.info({ phone: ownerForPairing, code }, 'Pairing code generated'))
-            .catch((error) => logger.warn({ err: error }, 'Failed to generate startup pairing code'))
-        } else {
-          logger.warn('OWNER_NUMBERS is empty, cannot auto-generate pairing code on startup.')
-        }
+        tryGenerateStartupPairingCode().catch((error) => logger.warn({ err: error }, 'Open-triggered pairing request failed'))
       }
+    }
+
+    if (connection === 'connecting' && shouldGenerateStartupPairingCode) {
+      tryGenerateStartupPairingCode().catch((error) => logger.warn({ err: error }, 'Connecting-triggered pairing request failed'))
     }
 
     if (connection === 'close') {
