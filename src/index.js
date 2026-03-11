@@ -9,14 +9,19 @@ import {
   DisconnectReason,
   jidNormalizedUser,
   downloadMediaMessage,
+  generateForwardMessageContent,
+  generateWAMessageFromContent,
 } from '@whiskeysockets/baileys'
 import { Boom } from '@hapi/boom'
+import { Sticker, StickerTypes } from 'wa-sticker-formatter'
 
 const logger = P({ level: process.env.LOG_LEVEL || 'info' })
 const startTime = Date.now()
 
 const BOT_NAME = process.env.BOT_NAME || 'PersonalBot'
 const PREFIX = process.env.BOT_PREFIX || '!'
+const BOT_LANG = (process.env.BOT_LANG || 'en').toLowerCase()
+const [STICKER_PACK, STICKER_AUTHOR] = (process.env.STICKER_PACKNAME || 'Lmao,made by ABYN').split(',').map((x) => x.trim())
 const AUTH_DIR = path.resolve(process.env.AUTH_DIR || 'data/auth')
 const DB_FILE = path.resolve(process.env.DB_FILE || 'data/store.json')
 const STATUS_DIR = path.resolve(process.env.STATUS_DIR || 'data/status')
@@ -32,10 +37,53 @@ const EVENT_FORWARD_JIDS = parseJids(process.env.EVENT_FORWARD_JIDS)
 const VIEW_ONCE_FORWARD_JIDS = parseJids(process.env.VIEW_ONCE_FORWARD_JIDS)
 const STATUS_FORWARD_JIDS = parseJids(process.env.STATUS_FORWARD_JIDS)
 
-ensureJsonDb()
-ensureDir(STATUS_DIR)
 const reminderJobs = new Map()
 const reminderMeta = new Map()
+const scheduleJobs = new Map()
+
+ensureJsonDb()
+ensureDir(STATUS_DIR)
+
+function t(key, vars = {}) {
+  const dict = {
+    en: {
+      unauthorized: '⛔ You are not authorized to use this bot.',
+      unknown: `Unknown command. Try ${PREFIX}help`,
+      usageRemind: `Usage: ${PREFIX}remind 10m review backup`,
+      usageScheduleText: `Usage: ${PREFIX}schedule text 30m <jid|current> your message`,
+      usageScheduleFwd: `Usage: reply message then ${PREFIX}schedule fwd 30m <jid|current>`,
+      noteNotFound: 'Note ID not found.',
+      todoNotFound: 'Todo ID not found.',
+      keywordNotFound: 'Keyword not found.',
+      reminderNotFound: 'Reminder ID not found.',
+      scheduleNotFound: 'Schedule ID not found.',
+      afkOn: '✅ AFK enabled.',
+      afkOff: '✅ AFK disabled.',
+      stickerReply: `Reply to an image with ${PREFIX}sticker`,
+      stickerFail: 'Failed to create sticker.',
+    },
+    id: {
+      unauthorized: '⛔ Kamu tidak punya akses untuk memakai bot ini.',
+      unknown: `Perintah tidak dikenal. Coba ${PREFIX}help`,
+      usageRemind: `Contoh: ${PREFIX}remind 10m cek backup`,
+      usageScheduleText: `Contoh: ${PREFIX}schedule text 30m <jid|current> isi pesan`,
+      usageScheduleFwd: `Contoh: balas pesan lalu ${PREFIX}schedule fwd 30m <jid|current>`,
+      noteNotFound: 'ID catatan tidak ditemukan.',
+      todoNotFound: 'ID todo tidak ditemukan.',
+      keywordNotFound: 'Keyword tidak ditemukan.',
+      reminderNotFound: 'ID reminder tidak ditemukan.',
+      scheduleNotFound: 'ID schedule tidak ditemukan.',
+      afkOn: '✅ Mode AFK aktif.',
+      afkOff: '✅ Mode AFK nonaktif.',
+      stickerReply: `Balas gambar dengan ${PREFIX}sticker`,
+      stickerFail: 'Gagal membuat stiker.',
+    },
+  }
+  const lang = dict[BOT_LANG] ? BOT_LANG : 'en'
+  let msg = dict[lang][key] || dict.en[key] || key
+  for (const [k, v] of Object.entries(vars)) msg = msg.replaceAll(`{${k}}`, String(v))
+  return msg
+}
 
 function toBool(value, defaultValue = false) {
   if (value === undefined) return defaultValue
@@ -47,11 +95,14 @@ function parseNumbers(raw = '') {
 }
 
 function parseJids(raw = '') {
-  return raw
-    .split(',')
-    .map((x) => x.trim())
-    .filter(Boolean)
-    .map((x) => (x.includes('@') ? x : `${x.replace(/\+/g, '')}@s.whatsapp.net`))
+  return raw.split(',').map((x) => x.trim()).filter(Boolean).map((x) => (x.includes('@') ? x : `${x.replace(/\+/g, '')}@s.whatsapp.net`))
+}
+
+function parseTargetJid(input, currentChatJid) {
+  const val = (input || '').trim()
+  if (!val || val === 'current' || val === '.') return currentChatJid
+  if (val.includes('@')) return val
+  return `${val.replace(/\+/g, '')}@s.whatsapp.net`
 }
 
 function ensureDir(dir) {
@@ -72,6 +123,7 @@ function ensureJsonDb() {
         'Document your life so future you can win faster.',
       ],
       afk: { enabled: false, message: 'I am currently AFK.', since: null, by: null },
+      schedules: [],
     }
     fs.writeFileSync(DB_FILE, JSON.stringify(seed, null, 2))
   }
@@ -80,6 +132,7 @@ function ensureJsonDb() {
 function readDb() {
   const db = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'))
   if (!db.afk) db.afk = { enabled: false, message: 'I am currently AFK.', since: null, by: null }
+  if (!db.schedules) db.schedules = []
   return db
 }
 
@@ -117,15 +170,22 @@ function parseCommand(text) {
   return { command: cmd.toLowerCase(), args: parts, fullArgs: parts.join(' ').trim() }
 }
 
-function parseReminder(input) {
-  const match = input.match(/^(\d+)([mhd])\s+(.+)$/i)
+function parseDelay(input) {
+  const match = input.match(/^(\d+)([mhd])$/i)
   if (!match) return null
   const amount = Number(match[1])
   const unit = match[2].toLowerCase()
   const multipliers = { m: 60_000, h: 3_600_000, d: 86_400_000 }
   const delay = amount * multipliers[unit]
   if (delay < 10_000 || delay > 30 * 86_400_000) return null
-  return { delay, message: match[3] }
+  return delay
+}
+
+function parseReminder(input) {
+  const [delayRaw, ...msgParts] = input.split(' ')
+  const delay = parseDelay(delayRaw)
+  if (!delay || msgParts.length === 0) return null
+  return { delay, message: msgParts.join(' ') }
 }
 
 function listItems(items, formatter) {
@@ -134,13 +194,7 @@ function listItems(items, formatter) {
 }
 
 function getMessageText(message) {
-  return (
-    message?.conversation ||
-    message?.extendedTextMessage?.text ||
-    message?.imageMessage?.caption ||
-    message?.videoMessage?.caption ||
-    ''
-  )
+  return message?.conversation || message?.extendedTextMessage?.text || message?.imageMessage?.caption || message?.videoMessage?.caption || ''
 }
 
 function extractViewOnce(message = {}) {
@@ -179,9 +233,97 @@ async function safeSend(sock, jid, payload, options) {
 async function forwardEventLog(sock, title, details, extraJids = []) {
   const targets = Array.from(new Set([...createEventDestinations(), ...extraJids]))
   if (!targets.length) return
-  const body = `📌 *${title}*\n${details}\nLogged: ${humanTs()}`
   for (const jid of targets) {
-    await safeSend(sock, jid, { text: body })
+    await safeSend(sock, jid, { text: `📌 *${title}*\n${details}\nLogged: ${humanTs()}` })
+  }
+}
+
+function hydrateSchedules(sock) {
+  const db = readDb()
+  const now = Date.now()
+
+  db.schedules = db.schedules.filter((item) => {
+    if (item.runAt <= now) return false
+    registerScheduleJob(sock, item)
+    return true
+  })
+
+  writeDb(db)
+}
+
+function registerScheduleJob(sock, item) {
+  if (scheduleJobs.has(item.id)) clearTimeout(scheduleJobs.get(item.id))
+  const timeout = setTimeout(async () => {
+    try {
+      if (item.type === 'text') {
+        await sock.sendMessage(item.targetJid, { text: item.text })
+      } else {
+        const fake = { key: { remoteJid: item.targetJid }, message: item.quotedMessage }
+        const content = await generateForwardMessageContent(fake, true)
+        const waMsg = await generateWAMessageFromContent(item.targetJid, content, {})
+        await sock.relayMessage(item.targetJid, waMsg.message, { messageId: waMsg.key.id })
+      }
+
+      await forwardEventLog(
+        sock,
+        'Scheduled Message Sent',
+        `ID: ${item.id}\nType: ${item.type}\nTo: ${item.targetJid}\nBy: ${item.by}\nPlanned: ${humanTs(item.runAt)}`
+      )
+    } catch (error) {
+      logger.warn({ err: error, id: item.id }, 'Failed scheduled send')
+    } finally {
+      scheduleJobs.delete(item.id)
+      const db = readDb()
+      db.schedules = db.schedules.filter((s) => s.id !== item.id)
+      writeDb(db)
+    }
+  }, Math.max(1000, item.runAt - Date.now()))
+
+  scheduleJobs.set(item.id, timeout)
+}
+
+
+function getQuotedContextMessage(msg) {
+  const source =
+    msg.message?.extendedTextMessage ||
+    msg.message?.imageMessage ||
+    msg.message?.videoMessage ||
+    msg.message?.documentMessage
+
+  const ctx = source?.contextInfo
+  if (!ctx?.quotedMessage) return null
+
+  return {
+    key: {
+      remoteJid: msg.key.remoteJid,
+      fromMe: false,
+      id: ctx.stanzaId,
+      participant: ctx.participant || msg.key.participant || msg.key.remoteJid,
+    },
+    message: ctx.quotedMessage,
+  }
+}
+
+async function makeStickerFromQuoted(sock, msg) {
+  const quoted = getQuotedContextMessage(msg)
+  if (!quoted || !quoted.message?.imageMessage) return { error: t('stickerReply') }
+
+  try {
+    const buffer = await downloadMediaMessage(quoted, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage })
+    if (!buffer?.length) return { error: t('stickerFail') }
+
+    const sticker = new Sticker(buffer, {
+      pack: STICKER_PACK || 'Lmao',
+      author: STICKER_AUTHOR || 'made by ABYN',
+      type: StickerTypes.FULL,
+      quality: 80,
+    })
+
+    const stickerBuffer = await sticker.toBuffer()
+    return { stickerBuffer }
+  } catch (error) {
+    logger.warn({ err: error }, 'Sticker creation failed')
+    return { error: t('stickerFail') }
   }
 }
 
@@ -199,6 +341,7 @@ async function connect() {
     markOnlineOnConnect: !HIDE_ONLINE,
   })
 
+  hydrateSchedules(sock)
   sock.ev.on('creds.update', saveCreds)
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
@@ -210,13 +353,10 @@ async function connect() {
 
         const chatJid = msg.key.remoteJid
         const senderJid = jidNormalizedUser(msg.key.participant || chatJid)
-        const senderNumber = senderJid.split('@')[0]
-        const senderName = msg.pushName || senderNumber
+        const senderName = msg.pushName || senderJid.split('@')[0]
         const messageText = getMessageText(msg.message)
 
-        if (!HIDE_READ_CHAT && chatJid !== 'status@broadcast') {
-          await sock.readMessages([msg.key])
-        }
+        if (!HIDE_READ_CHAT && chatJid !== 'status@broadcast') await sock.readMessages([msg.key])
 
         if (chatJid === 'status@broadcast') {
           await handleStatusMessage(sock, msg, senderJid, senderName, messageText)
@@ -231,7 +371,7 @@ async function connect() {
         const cmd = parseCommand(messageText)
         if (cmd) {
           if (!isAuthorized(senderJid)) {
-            await sock.sendMessage(chatJid, { text: '⛔ You are not authorized to use this bot.' }, { quoted: msg })
+            await sock.sendMessage(chatJid, { text: t('unauthorized') }, { quoted: msg })
             continue
           }
           await handleCommand(sock, msg, cmd, senderJid)
@@ -350,13 +490,7 @@ async function maybeAfkReply(sock, msg, senderJid) {
   const db = readDb()
   if (!db.afk?.enabled) return
 
-  await sock.sendMessage(
-    msg.key.remoteJid,
-    {
-      text: `🛌 AFK Notice\n${db.afk.message}\nSince: ${db.afk.since || 'unknown'}\nBy: ${db.afk.by || 'owner'}`,
-    },
-    { quoted: msg }
-  )
+  await sock.sendMessage(msg.key.remoteJid, { text: `🛌 AFK Notice\n${db.afk.message}\nSince: ${db.afk.since || 'unknown'}\nBy: ${db.afk.by || 'owner'}` }, { quoted: msg })
 }
 
 async function maybeAutoRespond(sock, msg, text) {
@@ -379,22 +513,26 @@ async function handleCommand(sock, msg, cmd, senderJid) {
     case 'help': {
       const helpText = [
         `*${BOT_NAME} Command Guide*`,
+        BOT_LANG === 'id' ? '_Bahasa: Indonesia_' : '_Language: English_',
         '',
-        `${PREFIX}help — show this command overview with descriptions`,
-        `${PREFIX}ping — quick health check`,
-        `${PREFIX}whoami — return your WhatsApp JID`,
-        `${PREFIX}chatid — return current chat JID`,
-        `${PREFIX}uptime — show bot uptime since last start`,
-        `${PREFIX}echo <text> — repeat your text`,
-        `${PREFIX}note add|list|find|del — manage personal notes`,
+        `${PREFIX}help — command list + descriptions`,
+        `${PREFIX}ping — health check`,
+        `${PREFIX}whoami — your JID`,
+        `${PREFIX}chatid — current chat JID`,
+        `${PREFIX}uptime — bot uptime`,
+        `${PREFIX}echo <text> — repeat text`,
+        `${PREFIX}note add|list|find|del — manage notes`,
         `${PREFIX}todo add|done|list|del — manage tasks`,
-        `${PREFIX}remind <time> <msg> — create reminder (10m,2h,1d)`,
-        `${PREFIX}remind list — list active reminders`,
-        `${PREFIX}remind cancel <id> — cancel a reminder`,
-        `${PREFIX}quote [add <text>] — get or save quotes`,
-        `${PREFIX}auto add|list|del — keyword auto-response rules`,
-        `${PREFIX}afk on <msg>|off|status — AFK auto-reply mode`,
-        `${PREFIX}stats — show bot usage stats`,
+        `${PREFIX}remind <time> <msg> — set reminder`,
+        `${PREFIX}remind list|cancel <id> — reminder manager`,
+        `${PREFIX}schedule text <time> <jid|current> <msg> — schedule text`,
+        `${PREFIX}schedule fwd <time> <jid|current> — schedule replied media/message`,
+        `${PREFIX}schedule list|cancel <id> — scheduler manager`,
+        `${PREFIX}sticker — reply image to create sticker`,
+        `${PREFIX}quote [add <text>] — quotes`,
+        `${PREFIX}auto add|list|del — auto responder rules`,
+        `${PREFIX}afk on <msg>|off|status — AFK mode`,
+        `${PREFIX}stats — usage stats`,
       ].join('\n')
       await sock.sendMessage(chatJid, { text: helpText }, { quoted: msg })
       break
@@ -432,6 +570,18 @@ async function handleCommand(sock, msg, cmd, senderJid) {
     case 'remind':
       await handleReminder(sock, msg, cmd, senderJid)
       break
+    case 'schedule':
+      await handleScheduler(sock, msg, cmd, senderJid)
+      break
+    case 'sticker': {
+      const { stickerBuffer, error } = await makeStickerFromQuoted(sock, msg)
+      if (error) {
+        await sock.sendMessage(chatJid, { text: error }, { quoted: msg })
+        break
+      }
+      await sock.sendMessage(chatJid, { sticker: stickerBuffer }, { quoted: msg })
+      break
+    }
     case 'stats': {
       const totalTodos = db.todos.length
       const completed = db.todos.filter((t) => t.done).length
@@ -440,13 +590,13 @@ async function handleCommand(sock, msg, cmd, senderJid) {
           `📊 *Stats*\n` +
           `Notes: ${db.notes.length}\nTodos: ${totalTodos} (✅ ${completed} / 🕒 ${totalTodos - completed})\n` +
           `Auto rules: ${Object.keys(db.autoresponders).length}\nQuotes: ${db.quotes.length}\n` +
-          `Reminders: ${reminderJobs.size}\nAuthorized users: ${AUTHORIZED_NUMBERS.length || 'unrestricted'}\n` +
-          `AFK: ${db.afk?.enabled ? `on (${db.afk.since})` : 'off'}`,
+          `Reminders: ${reminderJobs.size}\nSchedules: ${readDb().schedules.length}\n` +
+          `Authorized users: ${AUTHORIZED_NUMBERS.length || 'unrestricted'}\nAFK: ${db.afk?.enabled ? `on (${db.afk.since})` : 'off'}`,
       }, { quoted: msg })
       break
     }
     default:
-      await sock.sendMessage(chatJid, { text: `Unknown command. Try ${PREFIX}help` }, { quoted: msg })
+      await sock.sendMessage(chatJid, { text: t('unknown') }, { quoted: msg })
   }
 }
 
@@ -456,15 +606,14 @@ async function handleReminder(sock, msg, cmd, senderJid) {
 
   if (sub === 'list') {
     const mine = Array.from(reminderMeta.values()).filter((r) => r.chatJid === chatJid)
-    const out = listItems(mine, (r) => `${r.id} • ${humanTs(r.runAt)} • ${r.message}`)
-    await sock.sendMessage(chatJid, { text: `⏰ *Active Reminders*\n${out}` }, { quoted: msg })
+    await sock.sendMessage(chatJid, { text: `⏰ *Active Reminders*\n${listItems(mine, (r) => `${r.id} • ${humanTs(r.runAt)} • ${r.message}`)}` }, { quoted: msg })
     return
   }
 
   if (sub === 'cancel') {
     const id = rest[0]
     if (!id || !reminderJobs.has(id)) {
-      await sock.sendMessage(chatJid, { text: 'Reminder ID not found.' }, { quoted: msg })
+      await sock.sendMessage(chatJid, { text: t('reminderNotFound') }, { quoted: msg })
       return
     }
     clearTimeout(reminderJobs.get(id))
@@ -476,7 +625,7 @@ async function handleReminder(sock, msg, cmd, senderJid) {
 
   const parsed = parseReminder(cmd.fullArgs)
   if (!parsed) {
-    await sock.sendMessage(chatJid, { text: `Usage: ${PREFIX}remind 10m review backup` }, { quoted: msg })
+    await sock.sendMessage(chatJid, { text: t('usageRemind') }, { quoted: msg })
     return
   }
 
@@ -484,16 +633,92 @@ async function handleReminder(sock, msg, cmd, senderJid) {
   const runAt = Date.now() + parsed.delay
   reminderMeta.set(id, { id, chatJid, message: parsed.message, runAt, by: senderJid })
 
-  reminderJobs.set(
-    id,
-    setTimeout(async () => {
-      await sock.sendMessage(chatJid, { text: `⏰ *Reminder*\n${parsed.message}\nSet by: ${senderJid.split('@')[0]}\nID: ${id}` })
-      reminderJobs.delete(id)
-      reminderMeta.delete(id)
-    }, parsed.delay)
-  )
+  reminderJobs.set(id, setTimeout(async () => {
+    await sock.sendMessage(chatJid, { text: `⏰ *Reminder*\n${parsed.message}\nSet by: ${senderJid.split('@')[0]}\nID: ${id}` })
+    reminderJobs.delete(id)
+    reminderMeta.delete(id)
+  }, parsed.delay))
 
   await sock.sendMessage(chatJid, { text: `✅ Reminder (${id}) set for ${humanTs(runAt)}` }, { quoted: msg })
+}
+
+async function handleScheduler(sock, msg, cmd, senderJid) {
+  const chatJid = msg.key.remoteJid
+  const [sub, ...rest] = cmd.args
+
+  if (sub === 'list') {
+    const db = readDb()
+    const rows = db.schedules.filter((s) => s.by === senderJid)
+    const out = listItems(rows, (s) => `${s.id} • ${s.type} • ${s.targetJid} • ${humanTs(s.runAt)}`)
+    await sock.sendMessage(chatJid, { text: `🗓️ *Scheduled Messages*\n${out}` }, { quoted: msg })
+    return
+  }
+
+  if (sub === 'cancel') {
+    const id = rest[0]
+    const db = readDb()
+    const found = db.schedules.find((s) => s.id === id)
+    if (!id || !found) {
+      await sock.sendMessage(chatJid, { text: t('scheduleNotFound') }, { quoted: msg })
+      return
+    }
+    if (scheduleJobs.has(id)) {
+      clearTimeout(scheduleJobs.get(id))
+      scheduleJobs.delete(id)
+    }
+    db.schedules = db.schedules.filter((s) => s.id !== id)
+    writeDb(db)
+    await sock.sendMessage(chatJid, { text: `🗑️ Schedule ${id} cancelled.` }, { quoted: msg })
+    return
+  }
+
+  if (sub === 'text') {
+    const delay = parseDelay(rest[0] || '')
+    const targetJid = parseTargetJid(rest[1], chatJid)
+    const text = rest.slice(2).join(' ').trim()
+    if (!delay || !text) {
+      await sock.sendMessage(chatJid, { text: t('usageScheduleText') }, { quoted: msg })
+      return
+    }
+
+    const id = `s-${Date.now().toString().slice(-7)}`
+    const runAt = Date.now() + delay
+    const item = { id, type: 'text', targetJid, text, by: senderJid, runAt, createdAt: nowTs() }
+    const db = readDb()
+    db.schedules.push(item)
+    writeDb(db)
+    registerScheduleJob(sock, item)
+
+    await sock.sendMessage(chatJid, { text: `✅ Schedule (${id}) text to ${targetJid} at ${humanTs(runAt)}` }, { quoted: msg })
+    return
+  }
+
+  if (sub === 'fwd') {
+    const delay = parseDelay(rest[0] || '')
+    const targetJid = parseTargetJid(rest[1], chatJid)
+    const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage
+    if (!delay || !quoted) {
+      await sock.sendMessage(chatJid, { text: t('usageScheduleFwd') }, { quoted: msg })
+      return
+    }
+
+    const id = `s-${Date.now().toString().slice(-7)}`
+    const runAt = Date.now() + delay
+    const item = { id, type: 'fwd', targetJid, quotedMessage: quoted, by: senderJid, runAt, createdAt: nowTs() }
+    const db = readDb()
+    db.schedules.push(item)
+    writeDb(db)
+    registerScheduleJob(sock, item)
+
+    await sock.sendMessage(chatJid, { text: `✅ Schedule (${id}) forwarded message to ${targetJid} at ${humanTs(runAt)}` }, { quoted: msg })
+    return
+  }
+
+  await sock.sendMessage(
+    chatJid,
+    { text: `${t('usageScheduleText')}\n${t('usageScheduleFwd')}\n${PREFIX}schedule list\n${PREFIX}schedule cancel <id>` },
+    { quoted: msg }
+  )
 }
 
 async function handleAfk(sock, msg, cmd, db, senderJid) {
@@ -504,23 +729,19 @@ async function handleAfk(sock, msg, cmd, db, senderJid) {
     const message = rest.join(' ').trim() || 'I am currently AFK. I will reply later.'
     db.afk = { enabled: true, message, since: humanTs(), by: senderJid }
     writeDb(db)
-    await sock.sendMessage(chatJid, { text: '✅ AFK enabled.' }, { quoted: msg })
+    await sock.sendMessage(chatJid, { text: t('afkOn') }, { quoted: msg })
     return
   }
 
   if (sub === 'off') {
     db.afk = { enabled: false, message: 'I am currently AFK.', since: null, by: senderJid }
     writeDb(db)
-    await sock.sendMessage(chatJid, { text: '✅ AFK disabled.' }, { quoted: msg })
+    await sock.sendMessage(chatJid, { text: t('afkOff') }, { quoted: msg })
     return
   }
 
   if (sub === 'status') {
-    await sock.sendMessage(chatJid, {
-      text: db.afk?.enabled
-        ? `🛌 AFK is ON\nMessage: ${db.afk.message}\nSince: ${db.afk.since}\nBy: ${db.afk.by}`
-        : '🟢 AFK is OFF',
-    }, { quoted: msg })
+    await sock.sendMessage(chatJid, { text: db.afk?.enabled ? `🛌 AFK is ON\nMessage: ${db.afk.message}\nSince: ${db.afk.since}\nBy: ${db.afk.by}` : '🟢 AFK is OFF' }, { quoted: msg })
     return
   }
 
@@ -540,9 +761,7 @@ async function handleNote(sock, msg, cmd, db) {
     return sock.sendMessage(chatJid, { text: `📝 Saved note #${id}` }, { quoted: msg })
   }
 
-  if (sub === 'list') {
-    return sock.sendMessage(chatJid, { text: `🗒️ *Notes*\n${listItems(db.notes, (n) => `#${n.id} • ${n.text}`)}` }, { quoted: msg })
-  }
+  if (sub === 'list') return sock.sendMessage(chatJid, { text: `🗒️ *Notes*\n${listItems(db.notes, (n) => `#${n.id} • ${n.text}`)}` }, { quoted: msg })
 
   if (sub === 'find') {
     const keyword = rest.join(' ').trim().toLowerCase()
@@ -554,7 +773,7 @@ async function handleNote(sock, msg, cmd, db) {
   if (sub === 'del') {
     const id = Number(rest[0])
     const next = db.notes.filter((n) => n.id !== id)
-    if (next.length === db.notes.length) return sock.sendMessage(chatJid, { text: 'Note ID not found.' }, { quoted: msg })
+    if (next.length === db.notes.length) return sock.sendMessage(chatJid, { text: t('noteNotFound') }, { quoted: msg })
     db.notes = next
     writeDb(db)
     return sock.sendMessage(chatJid, { text: `🗑️ Deleted note #${id}` }, { quoted: msg })
@@ -576,18 +795,16 @@ async function handleTodo(sock, msg, cmd, db) {
   }
   if (sub === 'done') {
     const found = db.todos.find((t) => t.id === Number(rest[0]))
-    if (!found) return sock.sendMessage(chatJid, { text: 'Todo ID not found.' }, { quoted: msg })
+    if (!found) return sock.sendMessage(chatJid, { text: t('todoNotFound') }, { quoted: msg })
     found.done = true
     writeDb(db)
     return sock.sendMessage(chatJid, { text: `🎉 Task #${found.id} marked done` }, { quoted: msg })
   }
-  if (sub === 'list') {
-    return sock.sendMessage(chatJid, { text: `📌 *Todos*\n${listItems(db.todos, (t) => `${t.done ? '✅' : '🕒'} #${t.id} • ${t.text}`)}` }, { quoted: msg })
-  }
+  if (sub === 'list') return sock.sendMessage(chatJid, { text: `📌 *Todos*\n${listItems(db.todos, (t) => `${t.done ? '✅' : '🕒'} #${t.id} • ${t.text}`)}` }, { quoted: msg })
   if (sub === 'del') {
     const id = Number(rest[0])
     const next = db.todos.filter((t) => t.id !== id)
-    if (next.length === db.todos.length) return sock.sendMessage(chatJid, { text: 'Todo ID not found.' }, { quoted: msg })
+    if (next.length === db.todos.length) return sock.sendMessage(chatJid, { text: t('todoNotFound') }, { quoted: msg })
     db.todos = next
     writeDb(db)
     return sock.sendMessage(chatJid, { text: `🗑️ Task #${id} deleted` }, { quoted: msg })
@@ -612,7 +829,7 @@ async function handleAutoResponder(sock, msg, cmd, db) {
   }
   if (sub === 'del') {
     const keyword = rest.join(' ').trim()
-    if (!keyword || !db.autoresponders[keyword]) return sock.sendMessage(chatJid, { text: 'Keyword not found.' }, { quoted: msg })
+    if (!keyword || !db.autoresponders[keyword]) return sock.sendMessage(chatJid, { text: t('keywordNotFound') }, { quoted: msg })
     delete db.autoresponders[keyword]
     writeDb(db)
     return sock.sendMessage(chatJid, { text: `🗑️ Removed auto responder for "${keyword}"` }, { quoted: msg })

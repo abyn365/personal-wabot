@@ -1,10 +1,11 @@
 # Personal WhatsApp Bot (Baileys)
 
-Personal WhatsApp bot built with Baileys, designed for VPS deployment with a practical command set and event logging tools.
+Personal WhatsApp bot built with Baileys, designed for VPS deployment with a practical command set, localization, advanced scheduler, and event logging.
 
 ## Main Features
 
 - Owner + authorized-user command access
+- Localization via `.env` (`BOT_LANG=en|id`)
 - Productivity toolkit:
   - notes (`add/list/find/del`)
   - todos (`add/done/list/del`)
@@ -17,6 +18,11 @@ Personal WhatsApp bot built with Baileys, designed for VPS deployment with a pra
 - AFK mode with auto notice reply for non-authorized chats
 - Automation:
   - keyword auto responders
+- Sticker creator from replied images with packname/author metadata
+- **Message scheduler**:
+  - schedule text messages to any JID
+  - schedule forwarded replied messages (supports many chat/media types by forwarding original quoted payload)
+  - schedule list/cancel
 - Monitoring/logging:
   - deleted-message details with forwarding
   - anti view-once capture + forwarding
@@ -46,6 +52,11 @@ Personal WhatsApp bot built with Baileys, designed for VPS deployment with a pra
 - `!remind <10m|2h|1d> <message>` — set reminder
 - `!remind list` — list active reminders
 - `!remind cancel <id>` — cancel reminder
+- `!schedule text <time> <jid|current> <text>` — schedule a text message
+- `!schedule fwd <time> <jid|current>` — reply to any message, then schedule forwarding
+- `!schedule list` — list your schedules
+- `!schedule cancel <id>` — cancel schedule
+- `!sticker` — reply an image to convert into sticker with metadata
 - `!quote` — get random quote
 - `!quote add <text>` — add quote
 - `!auto add <keyword> | <response>` — add auto reply rule
@@ -77,7 +88,7 @@ What it does:
 - install base packages
 - install/use Node via `nvm` based on `.nvmrc`
 - install dependencies
-- create `.env` **interactively** via prompts
+- create `.env` **interactively** via prompts (including language `en/id` and sticker pack metadata)
 - run syntax check
 
 Raw script usage:
@@ -89,6 +100,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/abyn365/personal-wabot/main/
 ## Environment Variables
 
 See `.env.example` for full options:
+- localization (`BOT_LANG=en|id`)
+- sticker metadata (`STICKER_PACKNAME=PackName,Author`)
 - auth/access (`OWNER_NUMBERS`, `AUTHORIZED_NUMBERS`)
 - privacy (`HIDE_ONLINE`, `HIDE_READ_CHAT`, `HIDE_STATUS_VIEW`)
 - forwarding (`EVENT_FORWARD_JIDS`, `VIEW_ONCE_FORWARD_JIDS`, `STATUS_FORWARD_JIDS`)
@@ -142,6 +155,7 @@ sudo journalctl -u personal-wabot -f
 
 ## Notes
 
-- Reminder jobs are in-memory and reset on restart.
+- Reminder jobs and scheduler jobs are restored from JSON and executed by timers.
+- `schedule fwd` requires replying to a message to capture its payload.
 - Keep `.env` and `data/auth` private.
 - Use dedicated WhatsApp account for automation.
