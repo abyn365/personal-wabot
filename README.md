@@ -194,6 +194,8 @@ pm2 stop personal-wabot
 
 ## Setup Troubleshooting
 
-- If setup stops before prompts, rerun with debug: `bash -x setup.sh`.
-- New setup flow uses git-based nvm bootstrap (no shell-detach behavior from installer script).
+- If setup stops before prompts, rerun with debug: `bash -x setup.sh` (now includes explicit error line + failing command).
+- Setup now safely sources nvm with `set +u` compatibility, which fixes cases where script exits right after apt step.
+- New setup flow uses git-based nvm bootstrap first, then fallback installer if nvm still missing.
 - If `.env` already exists, setup intentionally keeps it unchanged; delete `.env` to re-run interactive prompts.
+- Non-root users are supported via automatic `sudo` for apt steps.

@@ -7,6 +7,17 @@ NODE_VERSION="${NODE_VERSION:-$(cat .nvmrc 2>/dev/null || echo 20)}"
 
 log() { printf "\n[setup] %s\n" "$1"; }
 warn() { printf "\n[setup][warn] %s\n" "$1"; }
+err() { printf "\n[setup][error] %s\n" "$1"; }
+trap 'err "Failed at line $LINENO while running: $BASH_COMMAND"' ERR
+
+run_as_root() {
+  if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+    "$@"
+  else
+    sudo "$@"
+  fi
+}
+
 ask() {
   local prompt="$1"
   local default="$2"
@@ -14,6 +25,7 @@ ask() {
   read -r -p "$prompt [$default]: " value || true
   echo "${value:-$default}"
 }
+
 ask_bool() {
   local prompt="$1"
   local default="$2"
@@ -36,9 +48,17 @@ ensure_repo_context() {
 install_base_packages() {
   if command -v apt >/dev/null 2>&1; then
     log "Installing base packages (curl, git, build tools)"
-    apt update -y
-    apt install -y curl git build-essential ca-certificates
+    run_as_root apt update -y
+    run_as_root apt install -y curl git build-essential ca-certificates
   fi
+}
+
+source_nvm_safely() {
+  # nvm.sh can break under `set -u`; temporarily disable nounset.
+  set +u
+  # shellcheck source=/dev/null
+  source "$NVM_DIR/nvm.sh"
+  set -u
 }
 
 ensure_nvm_loaded() {
@@ -62,10 +82,17 @@ ensure_nvm_loaded() {
     exit 1
   fi
 
-  # shellcheck source=/dev/null
-  source "$NVM_DIR/nvm.sh"
+  source_nvm_safely
+
   if ! command -v nvm >/dev/null 2>&1; then
     warn "nvm could not be loaded in this shell."
+    warn "Trying fallback install script..."
+    curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+    source_nvm_safely
+  fi
+
+  if ! command -v nvm >/dev/null 2>&1; then
+    err "nvm still unavailable after fallback install."
     exit 1
   fi
 }
