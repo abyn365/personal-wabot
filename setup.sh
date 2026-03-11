@@ -54,11 +54,15 @@ install_base_packages() {
 }
 
 source_nvm_safely() {
-  # nvm.sh can break under `set -u`; temporarily disable nounset.
-  set +u
+  local rc
+  # nvm.sh can break under `set -u` and can return non-zero in some shells.
+  # Temporarily disable nounset + errexit so we can handle failures ourselves.
+  set +u +e
   # shellcheck source=/dev/null
   source "$NVM_DIR/nvm.sh"
-  set -u
+  rc=$?
+  set -e -u
+  return "$rc"
 }
 
 ensure_nvm_loaded() {
@@ -82,13 +86,17 @@ ensure_nvm_loaded() {
     exit 1
   fi
 
-  source_nvm_safely
+  if ! source_nvm_safely; then
+    warn "Failed to source $NVM_DIR/nvm.sh on first attempt."
+  fi
 
   if ! command -v nvm >/dev/null 2>&1; then
     warn "nvm could not be loaded in this shell."
     warn "Trying fallback install script..."
     curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
-    source_nvm_safely
+    if ! source_nvm_safely; then
+      warn "Failed to source nvm after fallback install script."
+    fi
   fi
 
   if ! command -v nvm >/dev/null 2>&1; then
