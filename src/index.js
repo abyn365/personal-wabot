@@ -480,24 +480,25 @@ async function connect() {
       logger.warn({ code: statusCode, reason }, 'Connection closed')
 
       if (statusCode === DisconnectReason.loggedOut) {
-        // 401: session rejected by WA. Clear auth so next startup is fresh.
-        // Exit cleanly — the wrapper loop below will restart the process.
-        logger.warn('Session logged out (401). Clearing auth data. Process will restart...')
+        logger.warn('Session logged out (401). Clearing auth data. Restarting...')
         clearAuthDir()
-        process.exit(2) // exit code 2 = restart needed
+        process.exit(2)
+        return
       }
 
       if (statusCode === DisconnectReason.connectionReplaced) {
-        logger.warn('Connection replaced. Not reconnecting.')
+        logger.warn('Connection replaced by another session. Stopping.')
         process.exit(0)
+        return
       }
 
       if (statusCode === DisconnectReason.restartRequired) {
-        logger.info('Restart required after pairing — restarting process...')
+        logger.info('Restart required after pairing. Restarting...')
         process.exit(2)
+        return
       }
 
-      // All other errors: reconnect within the same process
+      // All other transient errors: reconnect in the same process
       logger.info('Reconnecting in 5s...')
       setTimeout(() => connect(), 5000)
     }
@@ -509,7 +510,9 @@ async function connect() {
 
     for (const msg of messages) {
       try {
-        if (!msg.message || msg.key.fromMe) continue
+        if (!msg.message) continue
+        // Skip messages sent by the bot itself (echo suppression)
+        if (msg.key.fromMe) continue
 
         const chatJid = msg.key.remoteJid
         const senderJid = jidNormalizedUser(msg.key.participant || chatJid)
@@ -530,7 +533,9 @@ async function connect() {
 
         const cmd = parseCommand(messageText)
         if (cmd) {
+          logger.info({ senderJid, chatJid, cmd: cmd.command }, 'Command received')
           if (!isAuthorized(senderJid)) {
+            logger.warn({ senderJid, authorized: AUTHORIZED_NUMBERS }, 'Unauthorized command attempt')
             await sock.sendMessage(chatJid, { text: t('unauthorized') }, { quoted: msg })
             continue
           }
