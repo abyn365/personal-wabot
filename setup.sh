@@ -4,6 +4,8 @@ set -euo pipefail
 REPO_URL="${REPO_URL:-https://github.com/abyn365/personal-wabot}"
 TARGET_DIR="${TARGET_DIR:-personal-wabot}"
 NODE_VERSION="${NODE_VERSION:-$(cat .nvmrc 2>/dev/null || echo 20)}"
+NVM_SHELL_INIT_ADDED="no"
+NVM_SHELL_INIT_FILE="$HOME/.bashrc"
 
 log() { printf "\n[setup] %s\n" "$1"; }
 warn() { printf "\n[setup][warn] %s\n" "$1"; }
@@ -102,6 +104,31 @@ ensure_nvm_loaded() {
   if ! command -v nvm >/dev/null 2>&1; then
     err "nvm still unavailable after fallback install."
     exit 1
+  fi
+}
+
+ensure_nvm_shell_init() {
+  local shell_file="$NVM_SHELL_INIT_FILE"
+  local nvm_export='export NVM_DIR="$HOME/.nvm"'
+  local nvm_source='[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"'
+
+  if [[ -f "$HOME/.profile" && ! -f "$shell_file" ]]; then
+    shell_file="$HOME/.profile"
+  fi
+
+  NVM_SHELL_INIT_FILE="$shell_file"
+
+  touch "$shell_file"
+
+  if ! grep -Fq "$nvm_export" "$shell_file"; then
+    {
+      echo ""
+      echo "# nvm"
+      echo "$nvm_export"
+      echo "$nvm_source"
+    } >> "$shell_file"
+    NVM_SHELL_INIT_ADDED="yes"
+    log "Added nvm init block to ${shell_file}"
   fi
 }
 
@@ -216,6 +243,7 @@ main() {
   install_base_packages
   ensure_nvm_loaded
   ensure_node
+  ensure_nvm_shell_init
 
   log "Installing dependencies"
   npm install
@@ -226,6 +254,12 @@ main() {
 
   log "Running syntax check"
   npm run check
+
+  if [[ "$NVM_SHELL_INIT_ADDED" == "yes" ]]; then
+    log "nvm shell initialization has been added for future shells."
+  fi
+
+  log "For this shell, run: source ${NVM_SHELL_INIT_FILE} && nvm use ${NODE_VERSION}"
 
   if [[ "${PM2_START:-no}" != "yes" ]]; then
     log "Setup complete. Run: npm start"
