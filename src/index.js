@@ -36,11 +36,6 @@ const AUTO_UPDATE = toBool(process.env.AUTO_UPDATE, false)
 const AUTO_UPDATE_INTERVAL_MINUTES = Number(process.env.AUTO_UPDATE_INTERVAL_MINUTES || 15)
 const AUTO_UPDATE_BRANCH = process.env.AUTO_UPDATE_BRANCH || 'main'
 const ALLOW_PAIRING_COMMAND = toBool(process.env.ALLOW_PAIRING_COMMAND, false)
-const AUTO_CLEAR_AUTH_ON_LOGOUT = toBool(process.env.AUTO_CLEAR_AUTH_ON_LOGOUT, false)
-const INITIAL_PAIRING_RECONNECT_DELAY_MS = Number(process.env.INITIAL_PAIRING_RECONNECT_DELAY_MS || 4000)
-const INITIAL_PAIRING_MAX_RECONNECTS = Number(process.env.INITIAL_PAIRING_MAX_RECONNECTS || 20)
-const PAIRING_CODE_COOLDOWN_MS = Number(process.env.PAIRING_CODE_COOLDOWN_MS || 60000)
-const PAIRING_MAX_ATTEMPTS_PER_SESSION = Number(process.env.PAIRING_MAX_ATTEMPTS_PER_SESSION || 3)
 
 const OWNER_NUMBERS = parseNumbers(process.env.OWNER_NUMBERS)
 const AUTHORIZED_NUMBERS = Array.from(new Set([...OWNER_NUMBERS, ...parseNumbers(process.env.AUTHORIZED_NUMBERS)]))
@@ -53,110 +48,7 @@ const reminderMeta = new Map()
 const scheduleJobs = new Map()
 const exec = promisify(execCb)
 
-const connLogState = {
-  lastConnection: null,
-  lastCloseSig: '',
-  lastCloseAt: 0,
-}
-
-const pairingState = {
-  reconnects: 0,
-  shouldGenerateCode: false,
-  isInFlight: false,
-  awaitingInitialPairing: false,
-  lastGeneratedAt: 0,
-  codeAttempts: 0,
-  pairingInProgress: false,
-  sessionStartAt: 0,
-}
-
-function resetPairingSession() {
-  pairingState.reconnects = 0
-  pairingState.shouldGenerateCode = false
-  pairingState.isInFlight = false
-  pairingState.awaitingInitialPairing = false
-  pairingState.lastGeneratedAt = 0
-  pairingState.codeAttempts = 0
-  pairingState.pairingInProgress = false
-  pairingState.sessionStartAt = Date.now()
-}
-
-function isPairingCooldownActive() {
-  if (pairingState.lastGeneratedAt === 0) return false
-  return Date.now() - pairingState.lastGeneratedAt < PAIRING_CODE_COOLDOWN_MS
-}
-
-function canGeneratePairingCode() {
-  if (!pairingState.shouldGenerateCode) return false
-  if (pairingState.isInFlight) return false
-  if (pairingState.pairingInProgress) return false
-  if (isPairingCooldownActive()) return false
-  if (pairingState.codeAttempts >= PAIRING_MAX_ATTEMPTS_PER_SESSION) return false
-  return true
-}
-
-function markPairingCodeGenerated() {
-  pairingState.lastGeneratedAt = Date.now()
-  pairingState.codeAttempts += 1
-  pairingState.shouldGenerateCode = false
-}
-
-function markPairingComplete() {
-  pairingState.shouldGenerateCode = false
-  pairingState.isInFlight = false
-  pairingState.awaitingInitialPairing = false
-  pairingState.pairingInProgress = false
-}
-
-ensureJsonDb()
-ensureDir(STATUS_DIR)
-
-function t(key, vars = {}) {
-  const dict = {
-    en: {
-      unauthorized: '⛔ You are not authorized to use this bot.',
-      unknown: `Unknown command. Try ${PREFIX}help`,
-      usageRemind: `Usage: ${PREFIX}remind 10m review backup`,
-      usageScheduleText: `Usage: ${PREFIX}schedule text 30m <jid|current> your message`,
-      usageScheduleFwd: `Usage: reply message then ${PREFIX}schedule fwd 30m <jid|current>`,
-      noteNotFound: 'Note ID not found.',
-      todoNotFound: 'Todo ID not found.',
-      keywordNotFound: 'Keyword not found.',
-      reminderNotFound: 'Reminder ID not found.',
-      scheduleNotFound: 'Schedule ID not found.',
-      afkOn: '✅ AFK enabled.',
-      afkOff: '✅ AFK disabled.',
-      stickerReply: `Reply to an image with ${PREFIX}sticker`,
-      stickerFail: 'Failed to create sticker.',
-      pairUsage: `Usage: ${PREFIX}pair 628xxxxxxxxxx`,
-      pairDisabled: 'Pair command disabled by config.',
-      pairFailed: 'Failed to request pairing code.',
-    },
-    id: {
-      unauthorized: '⛔ Kamu tidak punya akses untuk memakai bot ini.',
-      unknown: `Perintah tidak dikenal. Coba ${PREFIX}help`,
-      usageRemind: `Contoh: ${PREFIX}remind 10m cek backup`,
-      usageScheduleText: `Contoh: ${PREFIX}schedule text 30m <jid|current> isi pesan`,
-      usageScheduleFwd: `Contoh: balas pesan lalu ${PREFIX}schedule fwd 30m <jid|current>`,
-      noteNotFound: 'ID catatan tidak ditemukan.',
-      todoNotFound: 'ID todo tidak ditemukan.',
-      keywordNotFound: 'Keyword tidak ditemukan.',
-      reminderNotFound: 'ID reminder tidak ditemukan.',
-      scheduleNotFound: 'ID schedule tidak ditemukan.',
-      afkOn: '✅ Mode AFK aktif.',
-      afkOff: '✅ Mode AFK nonaktif.',
-      stickerReply: `Balas gambar dengan ${PREFIX}sticker`,
-      stickerFail: 'Gagal membuat stiker.',
-      pairUsage: `Contoh: ${PREFIX}pair 628xxxxxxxxxx`,
-      pairDisabled: 'Perintah pair dimatikan di konfigurasi.',
-      pairFailed: 'Gagal meminta kode pairing.',
-    },
-  }
-  const lang = dict[BOT_LANG] ? BOT_LANG : 'en'
-  let msg = dict[lang][key] || dict.en[key] || key
-  for (const [k, v] of Object.entries(vars)) msg = msg.replaceAll(`{${k}}`, String(v))
-  return msg
-}
+// ─── Helpers ────────────────────────────────────────────────────────────────
 
 function toBool(value, defaultValue = false) {
   if (value === undefined) return defaultValue
@@ -180,6 +72,14 @@ function parseTargetJid(input, currentChatJid) {
 
 function ensureDir(dir) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+}
+
+function clearAuthDir() {
+  if (fs.existsSync(AUTH_DIR)) {
+    fs.rmSync(AUTH_DIR, { recursive: true, force: true })
+    logger.warn('Cleared stale auth directory.')
+  }
+  ensureDir(AUTH_DIR)
 }
 
 function ensureJsonDb() {
@@ -213,54 +113,9 @@ function writeDb(data) {
   fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2))
 }
 
-function nowTs() {
-  return new Date().toISOString()
-}
-
-function humanTs(ts = Date.now()) {
-  return new Date(ts).toLocaleString()
-}
-
-function waitMs(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
-function connReasonLabel(code) {
-  const reasons = {
-    [DisconnectReason.loggedOut]: 'loggedOut',
-    [DisconnectReason.connectionClosed]: 'connectionClosed',
-    [DisconnectReason.connectionLost]: 'connectionLost',
-    [DisconnectReason.connectionReplaced]: 'connectionReplaced',
-    [DisconnectReason.restartRequired]: 'restartRequired',
-    [DisconnectReason.timedOut]: 'timedOut',
-    [DisconnectReason.multideviceMismatch]: 'multideviceMismatch',
-    [DisconnectReason.badSession]: 'badSession',
-  }
-  return reasons[code] || 'unknown'
-}
-
-function logConnectionTransition(connection) {
-  if (!connection || connection === connLogState.lastConnection) return
-  connLogState.lastConnection = connection
-  logger.info({ connection }, 'Connection state changed')
-}
-
-function shouldSuppressDuplicateClose(code, shouldReconnect) {
-  const sig = `${code}:${shouldReconnect}`
-  const now = Date.now()
-  const isDup = connLogState.lastCloseSig === sig && now - connLogState.lastCloseAt < 15_000
-  connLogState.lastCloseSig = sig
-  connLogState.lastCloseAt = now
-  return isDup
-}
-
-function formatErrShort(error) {
-  return {
-    name: error?.name || error?.constructor?.name || 'Error',
-    message: error?.message || 'Unknown error',
-    statusCode: new Boom(error)?.output?.statusCode || null,
-  }
-}
+function nowTs() { return new Date().toISOString() }
+function humanTs(ts = Date.now()) { return new Date(ts).toLocaleString() }
+function waitMs(ms) { return new Promise((resolve) => setTimeout(resolve, ms)) }
 
 function formatDuration(ms) {
   const s = Math.floor(ms / 1000)
@@ -350,6 +205,55 @@ function extractViewOnce(message = {}) {
   return { type: 'unknown' }
 }
 
+function t(key, vars = {}) {
+  const dict = {
+    en: {
+      unauthorized: '⛔ You are not authorized to use this bot.',
+      unknown: `Unknown command. Try ${PREFIX}help`,
+      usageRemind: `Usage: ${PREFIX}remind 10m review backup`,
+      usageScheduleText: `Usage: ${PREFIX}schedule text 30m <jid|current> your message`,
+      usageScheduleFwd: `Usage: reply message then ${PREFIX}schedule fwd 30m <jid|current>`,
+      noteNotFound: 'Note ID not found.',
+      todoNotFound: 'Todo ID not found.',
+      keywordNotFound: 'Keyword not found.',
+      reminderNotFound: 'Reminder ID not found.',
+      scheduleNotFound: 'Schedule ID not found.',
+      afkOn: '✅ AFK enabled.',
+      afkOff: '✅ AFK disabled.',
+      stickerReply: `Reply to an image with ${PREFIX}sticker`,
+      stickerFail: 'Failed to create sticker.',
+      pairUsage: `Usage: ${PREFIX}pair 628xxxxxxxxxx`,
+      pairDisabled: 'Pair command disabled by config.',
+      pairFailed: 'Failed to request pairing code.',
+    },
+    id: {
+      unauthorized: '⛔ Kamu tidak punya akses untuk memakai bot ini.',
+      unknown: `Perintah tidak dikenal. Coba ${PREFIX}help`,
+      usageRemind: `Contoh: ${PREFIX}remind 10m cek backup`,
+      usageScheduleText: `Contoh: ${PREFIX}schedule text 30m <jid|current> isi pesan`,
+      usageScheduleFwd: `Contoh: balas pesan lalu ${PREFIX}schedule fwd 30m <jid|current>`,
+      noteNotFound: 'ID catatan tidak ditemukan.',
+      todoNotFound: 'ID todo tidak ditemukan.',
+      keywordNotFound: 'Keyword tidak ditemukan.',
+      reminderNotFound: 'ID reminder tidak ditemukan.',
+      scheduleNotFound: 'ID schedule tidak ditemukan.',
+      afkOn: '✅ Mode AFK aktif.',
+      afkOff: '✅ Mode AFK nonaktif.',
+      stickerReply: `Balas gambar dengan ${PREFIX}sticker`,
+      stickerFail: 'Gagal membuat stiker.',
+      pairUsage: `Contoh: ${PREFIX}pair 628xxxxxxxxxx`,
+      pairDisabled: 'Perintah pair dimatikan di konfigurasi.',
+      pairFailed: 'Gagal meminta kode pairing.',
+    },
+  }
+  const lang = dict[BOT_LANG] ? BOT_LANG : 'en'
+  let msg = dict[lang][key] || dict.en[key] || key
+  for (const [k, v] of Object.entries(vars)) msg = msg.replaceAll(`{${k}}`, String(v))
+  return msg
+}
+
+// ─── Destination helpers ─────────────────────────────────────────────────────
+
 function createEventDestinations() {
   const fromOwners = FORWARD_EVENTS_TO_OWNER ? OWNER_NUMBERS.map((n) => `${n}@s.whatsapp.net`) : []
   const fromAuthorized = FORWARD_EVENTS_TO_AUTH_USERS ? AUTHORIZED_NUMBERS.map((n) => `${n}@s.whatsapp.net`) : []
@@ -380,6 +284,8 @@ async function forwardEventLog(sock, title, details, extraJids = []) {
   }
 }
 
+// ─── Auto update ─────────────────────────────────────────────────────────────
+
 function setupAutoUpdate(sock) {
   if (!AUTO_UPDATE) return
   const interval = Math.max(1, AUTO_UPDATE_INTERVAL_MINUTES) * 60_000
@@ -406,6 +312,8 @@ async function runAutoUpdate(sock) {
 
   await forwardEventLog(sock, 'Auto Update', 'Updated successfully. Restart process manually (or use PM2/systemd).')
 }
+
+// ─── Scheduler ───────────────────────────────────────────────────────────────
 
 function hydrateSchedules(sock) {
   const db = readDb()
@@ -451,6 +359,7 @@ function registerScheduleJob(sock, item) {
   scheduleJobs.set(item.id, timeout)
 }
 
+// ─── Quoted message helpers ──────────────────────────────────────────────────
 
 function getQuotedContextMessage(msg) {
   const source =
@@ -496,10 +405,50 @@ async function makeStickerFromQuoted(sock, msg) {
   }
 }
 
+// ─── Core connection ─────────────────────────────────────────────────────────
+
+/**
+ * Attempt to generate a pairing code, retrying on transient failures.
+ * Returns the code string, or null on permanent failure.
+ */
+async function requestPairingCodeWithRetry(sock, phoneNumber, maxAttempts = 5) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      // Wait until the WS is in OPEN state (readyState === 1)
+      const deadline = Date.now() + 12_000
+      while (sock.ws?.readyState !== 1 && Date.now() < deadline) {
+        await waitMs(200)
+      }
+      if (sock.ws?.readyState !== 1) {
+        logger.warn({ attempt }, 'Socket not open before pairing code request, retrying...')
+        await waitMs(2000)
+        continue
+      }
+
+      const code = await sock.requestPairingCode(phoneNumber)
+      return code
+    } catch (err) {
+      const status = new Boom(err)?.output?.statusCode
+      logger.warn({ attempt, maxAttempts, status, message: err?.message }, 'Pairing code request failed')
+
+      // 401 / 403 / 405 = permanent (bad session / wrong number / not allowed)
+      if ([401, 403, 405].includes(status)) return null
+
+      if (attempt < maxAttempts) await waitMs(3000 * attempt)
+    }
+  }
+  return null
+}
+
 async function connect() {
   ensureDir(AUTH_DIR)
+  ensureDir(STATUS_DIR)
+  ensureJsonDb()
+
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR)
   const { version } = await fetchLatestBaileysVersion()
+
+  const isNewSession = !state.creds?.registered
 
   const sock = makeWASocket({
     version,
@@ -507,90 +456,84 @@ async function connect() {
     logger,
     browser: ['Ubuntu', 'Chrome', '22.04'],
     markOnlineOnConnect: !HIDE_ONLINE,
+    // Don't generate QR — we use pairing codes only
+    printQRInTerminal: false,
   })
 
-  pairingState.awaitingInitialPairing = !state.creds?.registered
+  // ── Pairing code flow for new/unlinked sessions ───────────────────────────
+  if (isNewSession) {
+    const ownerPhone = OWNER_NUMBERS[0]
 
-  async function waitForStableConnection(timeoutMs = 10000) {
-    const start = Date.now()
-    while (Date.now() - start < timeoutMs) {
-      if (sock.ws?.readyState === 1) return true
-      await waitMs(100)
+    if (!ownerPhone) {
+      logger.error('OWNER_NUMBERS is not set. Cannot generate a pairing code. Set it in .env and restart.')
+    } else {
+      logger.info({ phone: ownerPhone }, 'New session — will request pairing code once connected.')
+
+      // Wait for the socket to be connected before requesting a code.
+      // We do this in a background task so we don't block the event loop.
+      ;(async () => {
+        // Give Baileys a moment to initiate the WS handshake
+        await waitMs(3000)
+
+        const code = await requestPairingCodeWithRetry(sock, ownerPhone)
+        if (code) {
+          logger.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
+          logger.info(`  PAIRING CODE: ${code}`)
+          logger.info(`  Phone: +${ownerPhone}`)
+          logger.info('  WhatsApp → Linked Devices → Link a Device')
+          logger.info('  → Link with phone number → enter code above')
+          logger.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
+        } else {
+          logger.error('Could not obtain a pairing code. Check OWNER_NUMBERS and restart.')
+        }
+      })()
     }
-    return false
   }
 
-  async function tryGenerateStartupPairingCode() {
-    if (!canGeneratePairingCode()) {
-      const cooldown = isPairingCooldownActive()
-      if (cooldown) {
-        const cooldownRemaining = Math.ceil((PAIRING_CODE_COOLDOWN_MS - (Date.now() - pairingState.lastGeneratedAt)) / 1000)
-        logger.debug({ cooldownRemaining }, 'Pairing code generation in cooldown, skipping')
-      } else if (pairingState.codeAttempts >= PAIRING_MAX_ATTEMPTS_PER_SESSION) {
-        logger.warn({ attempts: pairingState.codeAttempts, max: PAIRING_MAX_ATTEMPTS_PER_SESSION }, 'Pairing code max attempts reached')
+  // ── Credential persistence ────────────────────────────────────────────────
+  sock.ev.on('creds.update', saveCreds)
+
+  // ── Connection state ──────────────────────────────────────────────────────
+  sock.ev.on('connection.update', ({ connection, lastDisconnect }) => {
+    if (!connection) return
+
+    logger.info({ connection }, 'Connection state changed')
+
+    if (connection === 'open') {
+      logger.info({ bot: BOT_NAME }, '✅ Bot is online and ready')
+      hydrateSchedules(sock)
+      setupAutoUpdate(sock)
+    }
+
+    if (connection === 'close') {
+      const boom = new Boom(lastDisconnect?.error)
+      const code = boom?.output?.statusCode
+      const reason = Object.entries(DisconnectReason).find(([, v]) => v === code)?.[0] ?? 'unknown'
+
+      logger.warn({ code, reason }, 'Connection closed')
+
+      if (code === DisconnectReason.loggedOut) {
+        // Stale / revoked session — wipe auth and reconnect fresh so a new
+        // pairing code is generated automatically on the next connect() call.
+        logger.warn('Session was logged out (code 401). Clearing auth and reconnecting for fresh pairing...')
+        clearAuthDir()
+        // Small delay to avoid a tight loop if WA keeps rejecting immediately
+        setTimeout(() => connect(), 3000)
+        return
       }
-      return
-    }
 
-    const ownerForPairing = OWNER_NUMBERS[0]
-    if (!ownerForPairing) {
-      pairingState.shouldGenerateCode = false
-      logger.warn('OWNER_NUMBERS is empty, cannot auto-generate pairing code on startup.')
-      return
-    }
-
-    pairingState.isInFlight = true
-    pairingState.pairingInProgress = true
-
-    logger.debug('Waiting for stable connection before requesting pairing code...')
-    const stable = await waitForStableConnection(8000)
-    if (!stable) {
-      logger.warn('Connection not stable, deferring pairing code request')
-      pairingState.isInFlight = false
-      return
-    }
-
-    const maxAttempts = 6
-    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-      try {
-        const code = await sock.requestPairingCode(ownerForPairing)
-        markPairingCodeGenerated()
-        logger.info({ phone: ownerForPairing, code, attempt: pairingState.codeAttempts, max: PAIRING_MAX_ATTEMPTS_PER_SESSION }, 'Pairing code generated')
-        break
-      } catch (error) {
-        const status = new Boom(error)?.output?.statusCode
-        const shouldRetry = attempt < maxAttempts && [408, 428, 500, 503].includes(status)
-        logger.warn({ error: formatErrShort(error), attempt, maxAttempts, status, shouldRetry, retryDelayMs: shouldRetry ? 2000 : 0 }, 'Failed to generate startup pairing code')
-        if (!shouldRetry) break
-        await waitMs(2000)
+      if (code === DisconnectReason.connectionReplaced) {
+        logger.warn('Connection replaced by another session. Not reconnecting.')
+        return
       }
+
+      // For all other close reasons, reconnect
+      logger.info('Reconnecting in 5s...')
+      setTimeout(() => connect(), 5000)
     }
-    pairingState.isInFlight = false
-  }
-
-  if (!state.creds?.registered) {
-    logger.info('WhatsApp is not linked yet.')
-    logger.info('Use WhatsApp > Linked Devices > Link with phone number only.')
-    if (pairingState.sessionStartAt === 0) {
-      resetPairingSession()
-    }
-    pairingState.shouldGenerateCode = true
-    pairingState.awaitingInitialPairing = true
-
-    setTimeout(() => {
-      tryGenerateStartupPairingCode().catch((error) => logger.warn({ error: formatErrShort(error) }, 'Startup pairing bootstrap failed'))
-    }, 3000)
-  } else {
-    pairingState.awaitingInitialPairing = false
-  }
-
-  hydrateSchedules(sock)
-  setupAutoUpdate(sock)
-  sock.ev.on('creds.update', () => {
-    saveCreds()
-    if (state.creds?.registered) markPairingComplete()
   })
 
+  // ── Message handling ──────────────────────────────────────────────────────
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return
 
@@ -646,73 +589,9 @@ async function connect() {
       await forwardEventLog(sock, 'Deleted Message', details)
     }
   })
-
-  sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
-    logConnectionTransition(connection)
-
-    if (qr) {
-      logger.info('QR received, but this bot is configured to prioritize phone-number pairing code.')
-    }
-
-    if (connection === 'open') {
-      pairingState.reconnects = 0
-      logger.info({ bot: BOT_NAME }, 'Bot is online')
-    }
-
-    if (connection === 'close') {
-      const code = new Boom(lastDisconnect?.error)?.output?.statusCode
-
-      if (pairingState.awaitingInitialPairing && code !== DisconnectReason.loggedOut) {
-        if (!shouldSuppressDuplicateClose(code, true)) {
-          logger.warn({ code, reason: connReasonLabel(code) }, 'Connection closed during initial pairing')
-        }
-        pairingState.reconnects += 1
-
-        if (pairingState.reconnects > INITIAL_PAIRING_MAX_RECONNECTS) {
-          logger.error({
-            attempts: pairingState.codeAttempts,
-            maxAttempts: PAIRING_MAX_ATTEMPTS_PER_SESSION,
-            reconnects: pairingState.reconnects,
-            elapsed: formatDuration(Date.now() - pairingState.sessionStartAt)
-          }, 'Max reconnects reached during initial pairing. Stopping to prevent infinite loop.')
-          return
-        }
-
-        logger.info({ delayMs: INITIAL_PAIRING_RECONNECT_DELAY_MS, attempt: pairingState.reconnects, max: INITIAL_PAIRING_MAX_RECONNECTS }, 'Reconnecting for pairing...')
-        setTimeout(() => connect(), INITIAL_PAIRING_RECONNECT_DELAY_MS)
-        return
-      }
-
-      const shouldReconnect = code !== DisconnectReason.loggedOut
-      if (!shouldSuppressDuplicateClose(code, shouldReconnect)) {
-        logger.warn({ code, reason: connReasonLabel(code), shouldReconnect }, 'Connection closed')
-      }
-
-      if (code === DisconnectReason.loggedOut) {
-        if (pairingState.awaitingInitialPairing) {
-          logger.error({
-            attempts: pairingState.codeAttempts,
-            maxAttempts: PAIRING_MAX_ATTEMPTS_PER_SESSION,
-            elapsed: formatDuration(Date.now() - pairingState.sessionStartAt)
-          }, 'Session logged out while waiting for initial pairing. Automatic reconnect is disabled to prevent infinite pairing code generation loop. Please restart the bot manually to generate a new pairing code.')
-          pairingState.pairingInProgress = false
-          return
-        }
-
-        if (AUTO_CLEAR_AUTH_ON_LOGOUT) {
-          fs.rmSync(AUTH_DIR, { recursive: true, force: true })
-          logger.warn('Session logged out. Auth data cleared; attempting clean reconnect for re-linking.')
-          connect()
-          return
-        }
-
-        logger.warn('Session logged out. Delete auth data and re-run setup/start to login again.')
-      }
-
-      if (shouldReconnect) connect()
-    }
-  })
 }
+
+// ─── Message tracking ────────────────────────────────────────────────────────
 
 function trackMessageForDelete(msg, senderName) {
   const db = readDb()
@@ -726,6 +605,8 @@ function trackMessageForDelete(msg, senderName) {
   if (entries.length > 3000) db.deletedTracker = Object.fromEntries(entries.slice(entries.length - 1500))
   writeDb(db)
 }
+
+// ─── Status / view-once / AFK / auto-respond ────────────────────────────────
 
 async function handleStatusMessage(sock, msg, senderJid, senderName, text) {
   if (!HIDE_STATUS_VIEW) await sock.readMessages([msg.key])
@@ -807,6 +688,8 @@ async function maybeAutoRespond(sock, msg, text) {
     }
   }
 }
+
+// ─── Command router ───────────────────────────────────────────────────────────
 
 async function handleCommand(sock, msg, cmd, senderJid) {
   const chatJid = msg.key.remoteJid
@@ -922,6 +805,8 @@ async function handleCommand(sock, msg, cmd, senderJid) {
       await sock.sendMessage(chatJid, { text: t('unknown') }, { quoted: msg })
   }
 }
+
+// ─── Feature handlers ─────────────────────────────────────────────────────────
 
 async function handleReminder(sock, msg, cmd, senderJid) {
   const chatJid = msg.key.remoteJid
@@ -1174,6 +1059,8 @@ async function handleQuote(sock, msg, cmd, db) {
   const picked = db.quotes[Math.floor(Math.random() * db.quotes.length)] || 'No quote found.'
   return sock.sendMessage(chatJid, { text: `💡 ${picked}` }, { quoted: msg })
 }
+
+// ─── Bootstrap ────────────────────────────────────────────────────────────────
 
 connect().catch((error) => {
   logger.error({ err: error }, 'Fatal start error')
