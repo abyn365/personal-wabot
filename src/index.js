@@ -11,6 +11,7 @@ import {
   downloadMediaMessage,
   generateForwardMessageContent,
   generateWAMessageFromContent,
+  makeInMemoryStore,
 } from '@whiskeysockets/baileys'
 import { Boom } from '@hapi/boom'
 import { Sticker, StickerTypes } from 'wa-sticker-formatter'
@@ -418,6 +419,10 @@ async function connect() {
 
   const needsPairing = !state.creds?.registered
 
+  // In-memory message store — lets us retrieve messages by key,
+  // which is required for self-chat (fromMe) LID message handling.
+  const msgStore = makeInMemoryStore({ logger })
+
   const sock = makeWASocket({
     version,
     auth: state,
@@ -425,7 +430,14 @@ async function connect() {
     browser: ['Ubuntu', 'Chrome', '22.04'],
     markOnlineOnConnect: !HIDE_ONLINE,
     printQRInTerminal: false,
+    getMessage: async (key) => {
+      const stored = await msgStore.loadMessage(key.remoteJid, key.id)
+      return stored?.message || undefined
+    },
   })
+
+  // Bind store to socket events so it captures all messages
+  msgStore.bind(sock.ev)
 
   // ── Credential persistence ────────────────────────────────────────────────
   sock.ev.on('creds.update', saveCreds)
