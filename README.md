@@ -86,8 +86,8 @@ npm start
 ```
 
 On first run, complete login from terminal output:
-- if available, use the printed pairing code (Linked Devices -> Link with phone number)
-- or scan QR if your terminal supports QR rendering
+- use the printed pairing code (Linked Devices -> Link with phone number)
+- ensure `OWNER_NUMBERS` is set correctly, because startup pairing code is sent for the first owner number
 
 ## Interactive VPS Setup Script
 
@@ -121,6 +121,7 @@ See `.env.example` for full options:
 - paths (`AUTH_DIR`, `DB_FILE`, `STATUS_DIR`)
 - auto update (`AUTO_UPDATE`, `AUTO_UPDATE_INTERVAL_MINUTES`, `AUTO_UPDATE_BRANCH`)
 - MD pairing command (`ALLOW_PAIRING_COMMAND`)
+- auto-clear stale auth on forced logout (`AUTO_CLEAR_AUTH_ON_LOGOUT=true`)
 
 ## VPS + systemd (recommended if not using PM2)
 
@@ -203,3 +204,4 @@ pm2 stop personal-wabot
 - New setup flow uses git-based nvm bootstrap first, then fallback installer if nvm still missing.
 - If `.env` already exists, setup intentionally keeps it unchanged; delete `.env` to re-run interactive prompts.
 - Non-root users are supported via automatic `sudo` for apt steps.
+- If logs show `code: 401` + `Session logged out`, auth can now be auto-cleared (default) so the bot returns to fresh pairing flow automatically.

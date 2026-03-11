@@ -36,6 +36,7 @@ const AUTO_UPDATE = toBool(process.env.AUTO_UPDATE, false)
 const AUTO_UPDATE_INTERVAL_MINUTES = Number(process.env.AUTO_UPDATE_INTERVAL_MINUTES || 15)
 const AUTO_UPDATE_BRANCH = process.env.AUTO_UPDATE_BRANCH || 'main'
 const ALLOW_PAIRING_COMMAND = toBool(process.env.ALLOW_PAIRING_COMMAND, false)
+const AUTO_CLEAR_AUTH_ON_LOGOUT = toBool(process.env.AUTO_CLEAR_AUTH_ON_LOGOUT, true)
 
 const OWNER_NUMBERS = parseNumbers(process.env.OWNER_NUMBERS)
 const AUTHORIZED_NUMBERS = Array.from(new Set([...OWNER_NUMBERS, ...parseNumbers(process.env.AUTHORIZED_NUMBERS)]))
@@ -159,6 +160,10 @@ function nowTs() {
 
 function humanTs(ts = Date.now()) {
   return new Date(ts).toLocaleString()
+}
+
+function waitMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 function formatDuration(ms) {
@@ -408,18 +413,45 @@ async function connect() {
     markOnlineOnConnect: !HIDE_ONLINE,
   })
 
-  if (!state.creds?.registered) {
-    logger.info('WhatsApp is not linked yet.')
-    logger.info('Use WhatsApp > Linked Devices > Link with phone number (or QR).')
+  let shouldGenerateStartupPairingCode = false
+  let startupPairingInFlight = false
+
+  async function tryGenerateStartupPairingCode() {
+    if (!shouldGenerateStartupPairingCode || startupPairingInFlight) return
 
     const ownerForPairing = OWNER_NUMBERS[0]
-    if (ownerForPairing) {
-      sock.requestPairingCode(ownerForPairing)
-        .then((code) => logger.info({ phone: ownerForPairing, code }, 'Pairing code generated'))
-        .catch((error) => logger.warn({ err: error }, 'Failed to generate startup pairing code'))
-    } else {
+    if (!ownerForPairing) {
+      shouldGenerateStartupPairingCode = false
       logger.warn('OWNER_NUMBERS is empty, cannot auto-generate pairing code on startup.')
+      return
     }
+
+    startupPairingInFlight = true
+    const maxAttempts = 6
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        const code = await sock.requestPairingCode(ownerForPairing)
+        shouldGenerateStartupPairingCode = false
+        logger.info({ phone: ownerForPairing, code, attempt }, 'Pairing code generated')
+        break
+      } catch (error) {
+        const status = new Boom(error)?.output?.statusCode
+        const shouldRetry = attempt < maxAttempts && [408, 428, 500, 503].includes(status)
+        logger.warn({ err: error, attempt, maxAttempts, status, shouldRetry }, 'Failed to generate startup pairing code')
+        if (!shouldRetry) break
+        await waitMs(2000)
+      }
+    }
+    startupPairingInFlight = false
+  }
+
+  if (!state.creds?.registered) {
+    logger.info('WhatsApp is not linked yet.')
+    logger.info('Use WhatsApp > Linked Devices > Link with phone number only.')
+    shouldGenerateStartupPairingCode = true
+    setTimeout(() => {
+      tryGenerateStartupPairingCode().catch((error) => logger.warn({ err: error }, 'Startup pairing bootstrap failed'))
+    }, 1500)
   }
 
   hydrateSchedules(sock)
@@ -484,15 +516,35 @@ async function connect() {
 
   sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
     if (qr) {
-      logger.info('QR received. If your terminal does not render QR, use phone-number pairing code instead.')
+      logger.info('QR received, but this bot is configured to prioritize phone-number pairing code.')
+      if (shouldGenerateStartupPairingCode) {
+        tryGenerateStartupPairingCode().catch((error) => logger.warn({ err: error }, 'QR-triggered pairing request failed'))
+      }
     }
 
-    if (connection === 'open') logger.info(`${BOT_NAME} online`)
+    if (connection === 'open') {
+      logger.info(`${BOT_NAME} online`)
+      if (shouldGenerateStartupPairingCode) {
+        tryGenerateStartupPairingCode().catch((error) => logger.warn({ err: error }, 'Open-triggered pairing request failed'))
+      }
+    }
+
+    if (connection === 'connecting' && shouldGenerateStartupPairingCode) {
+      tryGenerateStartupPairingCode().catch((error) => logger.warn({ err: error }, 'Connecting-triggered pairing request failed'))
+    }
+
     if (connection === 'close') {
       const code = new Boom(lastDisconnect?.error)?.output?.statusCode
       const shouldReconnect = code !== DisconnectReason.loggedOut
       logger.warn({ code, shouldReconnect }, 'Connection closed')
       if (code === DisconnectReason.loggedOut) {
+        if (AUTO_CLEAR_AUTH_ON_LOGOUT) {
+          fs.rmSync(AUTH_DIR, { recursive: true, force: true })
+          logger.warn('Session logged out. Auth data cleared; attempting clean reconnect for re-linking.')
+          connect()
+          return
+        }
+
         logger.warn('Session logged out. Delete auth data and re-run setup/start to login again.')
       }
       if (shouldReconnect) connect()
