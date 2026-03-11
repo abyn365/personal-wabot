@@ -18,7 +18,48 @@ import { exec as execCb } from 'child_process'
 import { promisify } from 'util'
 
 const logger = P({ level: process.env.LOG_LEVEL || 'info' })
+const baileysLogger = P({ level: process.env.BAILEYS_LOG_LEVEL || 'fatal' })
 const startTime = Date.now()
+
+
+const LIBSIGNAL_NOISE_PATTERNS = [
+  /Failed to decrypt message with any known session\.{3}/,
+  /Session error:Error: Bad MAC Error: Bad MAC/,
+  /Closing open session in favor of incoming prekey bundle/,
+  /Closing session: SessionEntry/,
+]
+
+function shouldSuppressLibsignalNoise(args = []) {
+  const rendered = args
+    .map((arg) => {
+      if (arg instanceof Error) return `${arg.message}
+${arg.stack || ''}`
+      if (typeof arg === 'string') return arg
+      try { return JSON.stringify(arg) } catch { return String(arg) }
+    })
+    .join(' ')
+
+  return LIBSIGNAL_NOISE_PATTERNS.some((pattern) => pattern.test(rendered))
+}
+
+function installLibsignalLogFilter() {
+  if (!toBool(process.env.SUPPRESS_LIBSIGNAL_NOISE, true)) return
+
+  const originalError = console.error.bind(console)
+  const originalLog = console.log.bind(console)
+
+  console.error = (...args) => {
+    if (shouldSuppressLibsignalNoise(args)) return
+    originalError(...args)
+  }
+
+  console.log = (...args) => {
+    if (shouldSuppressLibsignalNoise(args)) return
+    originalLog(...args)
+  }
+}
+
+installLibsignalLogFilter()
 
 const BOT_NAME = process.env.BOT_NAME || 'PersonalBot'
 const PREFIX = process.env.BOT_PREFIX || '!'
@@ -426,7 +467,7 @@ async function connect() {
   const sock = makeWASocket({
     version,
     auth: state,
-    logger,
+    logger: baileysLogger,
     browser: ['Ubuntu', 'Chrome', '22.04'],
     markOnlineOnConnect: !HIDE_ONLINE,
     printQRInTerminal: false,
