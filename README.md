@@ -177,7 +177,7 @@ sudo journalctl -u personal-wabot -f
 
 ## VPS + PM2 (optional)
 
-If you prefer PM2 instead of systemd, setup script can install/start PM2 automatically.
+If you prefer PM2 instead of systemd, setup script can install/start PM2 automatically. Setup is idempotent: rerunning `bash setup.sh` is safe.
 
 Manual PM2 commands:
 
@@ -190,3 +190,10 @@ pm2 logs personal-wabot
 pm2 restart personal-wabot
 pm2 stop personal-wabot
 ```
+
+
+## Setup Troubleshooting
+
+- If setup stops before prompts, rerun with debug: `bash -x setup.sh`.
+- New setup flow uses git-based nvm bootstrap (no shell-detach behavior from installer script).
+- If `.env` already exists, setup intentionally keeps it unchanged; delete `.env` to re-run interactive prompts.
