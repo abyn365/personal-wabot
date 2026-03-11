@@ -511,6 +511,15 @@ async function connect() {
 
   pairingState.awaitingInitialPairing = !state.creds?.registered
 
+  async function waitForStableConnection(timeoutMs = 10000) {
+    const start = Date.now()
+    while (Date.now() - start < timeoutMs) {
+      if (sock.ws?.readyState === 1) return true
+      await waitMs(100)
+    }
+    return false
+  }
+
   async function tryGenerateStartupPairingCode() {
     if (!canGeneratePairingCode()) {
       const cooldown = isPairingCooldownActive()
@@ -533,12 +542,20 @@ async function connect() {
     pairingState.isInFlight = true
     pairingState.pairingInProgress = true
 
+    logger.debug('Waiting for stable connection before requesting pairing code...')
+    const stable = await waitForStableConnection(8000)
+    if (!stable) {
+      logger.warn('Connection not stable, deferring pairing code request')
+      pairingState.isInFlight = false
+      return
+    }
+
     const maxAttempts = 6
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       try {
         const code = await sock.requestPairingCode(ownerForPairing)
         markPairingCodeGenerated()
-        logger.info({ phone: ownerForPairing, code, attempt: pairingState.codeAttempts, maxAttempts: PAIRING_MAX_ATTEMPTS_PER_SESSION }, 'Pairing code generated')
+        logger.info({ phone: ownerForPairing, code, attempt: pairingState.codeAttempts, max: PAIRING_MAX_ATTEMPTS_PER_SESSION }, 'Pairing code generated')
         break
       } catch (error) {
         const status = new Boom(error)?.output?.statusCode
@@ -558,9 +575,13 @@ async function connect() {
       resetPairingSession()
     }
     pairingState.shouldGenerateCode = true
+    pairingState.awaitingInitialPairing = true
+
     setTimeout(() => {
       tryGenerateStartupPairingCode().catch((error) => logger.warn({ error: formatErrShort(error) }, 'Startup pairing bootstrap failed'))
-    }, 1500)
+    }, 3000)
+  } else {
+    pairingState.awaitingInitialPairing = false
   }
 
   hydrateSchedules(sock)
@@ -631,29 +652,42 @@ async function connect() {
 
     if (qr) {
       logger.info('QR received, but this bot is configured to prioritize phone-number pairing code.')
-      if (canGeneratePairingCode()) {
-        tryGenerateStartupPairingCode().catch((error) => logger.warn({ error: formatErrShort(error) }, 'QR-triggered pairing request failed'))
-      }
     }
 
     if (connection === 'open') {
       pairingState.reconnects = 0
       logger.info({ bot: BOT_NAME }, 'Bot is online')
-      if (canGeneratePairingCode()) {
-        tryGenerateStartupPairingCode().catch((error) => logger.warn({ error: formatErrShort(error) }, 'Open-triggered pairing request failed'))
-      }
-    }
-
-    if (connection === 'connecting' && canGeneratePairingCode()) {
-      tryGenerateStartupPairingCode().catch((error) => logger.warn({ error: formatErrShort(error) }, 'Connecting-triggered pairing request failed'))
     }
 
     if (connection === 'close') {
       const code = new Boom(lastDisconnect?.error)?.output?.statusCode
+
+      if (pairingState.awaitingInitialPairing && code !== DisconnectReason.loggedOut) {
+        if (!shouldSuppressDuplicateClose(code, true)) {
+          logger.warn({ code, reason: connReasonLabel(code) }, 'Connection closed during initial pairing')
+        }
+        pairingState.reconnects += 1
+
+        if (pairingState.reconnects > INITIAL_PAIRING_MAX_RECONNECTS) {
+          logger.error({
+            attempts: pairingState.codeAttempts,
+            maxAttempts: PAIRING_MAX_ATTEMPTS_PER_SESSION,
+            reconnects: pairingState.reconnects,
+            elapsed: formatDuration(Date.now() - pairingState.sessionStartAt)
+          }, 'Max reconnects reached during initial pairing. Stopping to prevent infinite loop.')
+          return
+        }
+
+        logger.info({ delayMs: INITIAL_PAIRING_RECONNECT_DELAY_MS, attempt: pairingState.reconnects, max: INITIAL_PAIRING_MAX_RECONNECTS }, 'Reconnecting for pairing...')
+        setTimeout(() => connect(), INITIAL_PAIRING_RECONNECT_DELAY_MS)
+        return
+      }
+
       const shouldReconnect = code !== DisconnectReason.loggedOut
       if (!shouldSuppressDuplicateClose(code, shouldReconnect)) {
         logger.warn({ code, reason: connReasonLabel(code), shouldReconnect }, 'Connection closed')
       }
+
       if (code === DisconnectReason.loggedOut) {
         if (pairingState.awaitingInitialPairing) {
           logger.error({
@@ -674,6 +708,7 @@ async function connect() {
 
         logger.warn('Session logged out. Delete auth data and re-run setup/start to login again.')
       }
+
       if (shouldReconnect) connect()
     }
   })
