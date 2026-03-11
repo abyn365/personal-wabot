@@ -18,10 +18,57 @@ import { exec as execCb } from 'child_process'
 import { promisify } from 'util'
 
 const logger = P({ level: process.env.LOG_LEVEL || 'info' })
+const baileysLogger = P({ level: process.env.BAILEYS_LOG_LEVEL || 'fatal' })
 const startTime = Date.now()
 
+
+const LIBSIGNAL_NOISE_PATTERNS = [
+  /Failed to decrypt message with any known session\.{3}/,
+  /Session error:Error: Bad MAC Error: Bad MAC/,
+  /Closing open session in favor of incoming prekey bundle/,
+  /Closing session: SessionEntry/,
+  /SessionEntry\s*\{/,
+  /libsignal\/src\/(session_cipher|crypto|queue_job)\.js/,
+]
+
+function shouldSuppressLibsignalNoise(args = []) {
+  const rendered = args
+    .map((arg) => {
+      if (arg instanceof Error) return `${arg.message}
+${arg.stack || ''}`
+      if (typeof arg === 'string') return arg
+      try { return JSON.stringify(arg) } catch { return String(arg) }
+    })
+    .join(' ')
+
+  return LIBSIGNAL_NOISE_PATTERNS.some((pattern) => pattern.test(rendered))
+}
+
+function installLibsignalLogFilter() {
+  if (!toBool(process.env.SUPPRESS_LIBSIGNAL_NOISE, true)) return
+
+  const originalStdoutWrite = process.stdout.write.bind(process.stdout)
+  const originalStderrWrite = process.stderr.write.bind(process.stderr)
+
+  const filteredWrite = (originalWrite) => (chunk, encoding, callback) => {
+    const text = typeof chunk === 'string' ? chunk : chunk?.toString(encoding || 'utf8')
+    if (text && shouldSuppressLibsignalNoise([text])) {
+      if (typeof callback === 'function') callback()
+      return true
+    }
+    return originalWrite(chunk, encoding, callback)
+  }
+
+  process.stdout.write = filteredWrite(originalStdoutWrite)
+  process.stderr.write = filteredWrite(originalStderrWrite)
+}
+
+
+installLibsignalLogFilter()
+
 const BOT_NAME = process.env.BOT_NAME || 'PersonalBot'
-const PREFIX = process.env.BOT_PREFIX || '!'
+const COMMAND_PREFIXES = parsePrefixes(process.env.BOT_PREFIXES, process.env.BOT_PREFIX || '!')
+const PREFIX = COMMAND_PREFIXES[0]
 const BOT_LANG = (process.env.BOT_LANG || 'en').toLowerCase()
 const [STICKER_PACK, STICKER_AUTHOR] = (process.env.STICKER_PACKNAME || 'Lmao,made by ABYN').split(',').map((x) => x.trim())
 const AUTH_DIR = path.resolve(process.env.AUTH_DIR || 'data/auth')
@@ -61,6 +108,16 @@ function parseNumbers(raw = '') {
 
 function parseJids(raw = '') {
   return raw.split(',').map((x) => x.trim()).filter(Boolean).map((x) => (x.includes('@') ? x : `${x.replace(/\+/g, '')}@s.whatsapp.net`))
+}
+
+function parsePrefixes(raw = '', fallback = '!') {
+  const configured = String(raw || '')
+    .split(',')
+    .map((x) => x.trim())
+    .filter(Boolean)
+
+  const defaults = [fallback, '.']
+  return Array.from(new Set([...configured, ...defaults]))
 }
 
 function parseTargetJid(input, currentChatJid) {
@@ -132,11 +189,15 @@ function isAuthorized(senderJid) {
 }
 
 function parseCommand(text) {
-  if (!text?.startsWith(PREFIX)) return null
-  const raw = text.slice(PREFIX.length).trim()
+  const input = String(text || '')
+  const prefix = COMMAND_PREFIXES.find((candidate) => input.startsWith(candidate))
+  if (!prefix) return null
+
+  const raw = input.slice(prefix.length).trim()
   if (!raw) return null
+
   const [cmd, ...parts] = raw.split(' ')
-  return { command: cmd.toLowerCase(), args: parts, fullArgs: parts.join(' ').trim() }
+  return { command: cmd.toLowerCase(), args: parts, fullArgs: parts.join(' ').trim(), prefix }
 }
 
 function parseDurationToken(token = '') {
@@ -426,7 +487,7 @@ async function connect() {
   const sock = makeWASocket({
     version,
     auth: state,
-    logger,
+    logger: baileysLogger,
     browser: ['Ubuntu', 'Chrome', '22.04'],
     markOnlineOnConnect: !HIDE_ONLINE,
     printQRInTerminal: false,
@@ -529,7 +590,7 @@ async function connect() {
 
   // ── Message handling ──────────────────────────────────────────────────────
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    if (type !== 'notify') return
+    if (!['notify', 'append'].includes(type)) return
 
     for (const msg of messages) {
       try {
