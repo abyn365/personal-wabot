@@ -89,6 +89,7 @@ What it does:
 - install/use Node via `nvm` based on `.nvmrc`
 - install dependencies
 - create `.env` **interactively** via prompts (including language `en/id` and sticker pack metadata)
+- optional PM2 install + auto-start
 - run syntax check
 
 Raw script usage:
@@ -107,7 +108,7 @@ See `.env.example` for full options:
 - forwarding (`EVENT_FORWARD_JIDS`, `VIEW_ONCE_FORWARD_JIDS`, `STATUS_FORWARD_JIDS`)
 - paths (`AUTH_DIR`, `DB_FILE`, `STATUS_DIR`)
 
-## VPS + systemd
+## VPS + systemd (recommended if not using PM2)
 
 1) Prepare and configure:
 
@@ -159,3 +160,20 @@ sudo journalctl -u personal-wabot -f
 - `schedule fwd` requires replying to a message to capture its payload.
 - Keep `.env` and `data/auth` private.
 - Use dedicated WhatsApp account for automation.
+
+
+## VPS + PM2 (optional)
+
+If you prefer PM2 instead of systemd, setup script can install/start PM2 automatically.
+
+Manual PM2 commands:
+
+```bash
+npm install -g pm2
+pm2 start src/index.js --name personal-wabot
+pm2 save
+pm2 startup
+pm2 logs personal-wabot
+pm2 restart personal-wabot
+pm2 stop personal-wabot
+```

@@ -8,7 +8,10 @@
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
     "check": "node --check src/index.js",
-    "setup": "bash setup.sh"
+    "setup": "bash setup.sh",
+    "pm2:start": "pm2 start src/index.js --name personal-wabot",
+    "pm2:restart": "pm2 restart personal-wabot",
+    "pm2:logs": "pm2 logs personal-wabot"
   },
   "keywords": [
     "whatsapp",

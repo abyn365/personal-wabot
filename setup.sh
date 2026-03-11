@@ -13,6 +13,14 @@ ask() {
   read -r -p "$prompt [$default]: " value || true
   echo "${value:-$default}"
 }
+ask_bool() {
+  local prompt="$1"
+  local default="$2"
+  local value
+  read -r -p "$prompt [$default]: " value || true
+  value="${value:-$default}"
+  [[ "$value" =~ ^([Yy]|[Yy]es|true|1)$ ]] && echo "yes" || echo "no"
+}
 
 if [[ ! -f package.json ]]; then
   log "Cloning repository ${REPO_URL} into ${TARGET_DIR}"
@@ -47,6 +55,11 @@ log "Using Node $(node -v) and npm $(npm -v)"
 log "Installing dependencies"
 npm install
 
+
+PM2_INSTALL="no"
+PM2_START="no"
+PM2_APP_NAME="personal-wabot"
+
 if [[ ! -f .env ]]; then
   log "Creating .env interactively"
 
@@ -63,6 +76,11 @@ if [[ ! -f .env ]]; then
     EVENT_FORWARD_JIDS_VALUE="$(ask 'Extra log forwarding JIDs (comma-separated, optional)' '')"
     VIEW_ONCE_FORWARD_JIDS_VALUE="$(ask 'Extra view-once forwarding JIDs (comma-separated, optional)' '')"
     STATUS_FORWARD_JIDS_VALUE="$(ask 'Extra status forwarding JIDs (comma-separated, optional)' '')"
+    PM2_INSTALL="$(ask_bool 'Install PM2 globally? (yes/no)' 'yes')"
+    if [[ "$PM2_INSTALL" == "yes" ]]; then
+      PM2_START="$(ask_bool 'Start bot with PM2 after setup? (yes/no)' 'yes')"
+      PM2_APP_NAME="$(ask 'PM2 app name' 'personal-wabot')"
+    fi
   else
     log "Non-interactive shell detected, falling back to .env.example defaults"
     cp .env.example .env
@@ -97,7 +115,25 @@ else
   log ".env already exists, leaving it unchanged"
 fi
 
+if [[ "$PM2_INSTALL" == "yes" ]]; then
+  log "Installing PM2"
+  npm install -g pm2
+
+  if [[ "$PM2_START" == "yes" ]]; then
+    log "Starting bot with PM2 (app: ${PM2_APP_NAME})"
+    pm2 delete "$PM2_APP_NAME" >/dev/null 2>&1 || true
+    pm2 start src/index.js --name "$PM2_APP_NAME"
+    pm2 save
+    pm2 startup || true
+  fi
+fi
+
 log "Running syntax check"
 npm run check
 
-log "Setup complete. Run: npm start"
+if [[ "$PM2_START" == "yes" ]]; then
+  log "Setup complete. Bot is running with PM2 as '${PM2_APP_NAME}'."
+  log "Useful: pm2 logs ${PM2_APP_NAME}"
+else
+  log "Setup complete. Run: npm start"
+fi
