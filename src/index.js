@@ -431,37 +431,37 @@ async function connect() {
   sock.ev.on('creds.update', saveCreds)
 
   // ── Connection state ──────────────────────────────────────────────────────
-  // Track whether we've already sent the pairing code in this session
+  // Guard so we only request one pairing code per connect() call
   let pairingCodeSent = false
 
-  sock.ev.on('connection.update', async ({ connection, lastDisconnect }) => {
-    if (!connection) return
+  sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
+    // Per Baileys docs, request pairing code on 'connecting' state or when a
+    // QR event fires — that is the correct moment the socket accepts the call.
+    if (needsPairing && !pairingCodeSent && (connection === 'connecting' || !!qr)) {
+      pairingCodeSent = true
+      const ownerPhone = OWNER_NUMBERS[0]
 
+      if (!ownerPhone) {
+        logger.error('OWNER_NUMBERS is not set in .env — cannot generate pairing code.')
+      } else {
+        try {
+          const code = await sock.requestPairingCode(ownerPhone)
+          logger.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
+          logger.info(`  PAIRING CODE : ${code}`)
+          logger.info(`  Phone        : +${ownerPhone}`)
+          logger.info('  WhatsApp → Linked Devices → Link a Device')
+          logger.info('  → Link with phone number → enter the code above')
+          logger.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
+        } catch (err) {
+          logger.error({ err }, 'Failed to request pairing code — restart the bot to try again.')
+        }
+      }
+    }
+
+    if (!connection) return
     logger.info({ connection }, 'Connection state changed')
 
     if (connection === 'open') {
-      // ── Pairing code: request immediately once socket is confirmed open ──
-      if (needsPairing && !pairingCodeSent) {
-        pairingCodeSent = true
-        const ownerPhone = OWNER_NUMBERS[0]
-
-        if (!ownerPhone) {
-          logger.error('OWNER_NUMBERS is not set in .env — cannot generate pairing code.')
-        } else {
-          try {
-            const code = await sock.requestPairingCode(ownerPhone)
-            logger.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
-            logger.info(`  PAIRING CODE : ${code}`)
-            logger.info(`  Phone        : +${ownerPhone}`)
-            logger.info('  WhatsApp → Linked Devices → Link a Device')
-            logger.info('  → Link with phone number → enter the code above')
-            logger.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
-          } catch (err) {
-            logger.error({ err }, 'Failed to request pairing code — restart the bot to try again.')
-          }
-        }
-      }
-
       logger.info({ bot: BOT_NAME }, '✅ Bot is online and ready')
       hydrateSchedules(sock)
       setupAutoUpdate(sock)
@@ -483,6 +483,13 @@ async function connect() {
 
       if (code === DisconnectReason.connectionReplaced) {
         logger.warn('Connection replaced by another session. Not reconnecting.')
+        return
+      }
+
+      // restartRequired = WA forcing reconnect after a successful pairing scan
+      if (code === DisconnectReason.restartRequired) {
+        logger.info('Restart required (normal after pairing scan). Reconnecting...')
+        setTimeout(() => connect(), 1000)
         return
       }
 
