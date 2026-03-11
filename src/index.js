@@ -47,17 +47,22 @@ ${arg.stack || ''}`
 function installLibsignalLogFilter() {
   if (!toBool(process.env.SUPPRESS_LIBSIGNAL_NOISE, true)) return
 
-  const levels = ['error', 'warn', 'log', 'info', 'debug', 'trace']
+  const originalStdoutWrite = process.stdout.write.bind(process.stdout)
+  const originalStderrWrite = process.stderr.write.bind(process.stderr)
 
-  for (const level of levels) {
-    const original = console[level]?.bind(console)
-    if (!original) continue
-    console[level] = (...args) => {
-      if (shouldSuppressLibsignalNoise(args)) return
-      original(...args)
+  const filteredWrite = (originalWrite) => (chunk, encoding, callback) => {
+    const text = typeof chunk === 'string' ? chunk : chunk?.toString(encoding || 'utf8')
+    if (text && shouldSuppressLibsignalNoise([text])) {
+      if (typeof callback === 'function') callback()
+      return true
     }
+    return originalWrite(chunk, encoding, callback)
   }
+
+  process.stdout.write = filteredWrite(originalStdoutWrite)
+  process.stderr.write = filteredWrite(originalStderrWrite)
 }
+
 
 installLibsignalLogFilter()
 
@@ -585,7 +590,7 @@ async function connect() {
 
   // ── Message handling ──────────────────────────────────────────────────────
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    if (type !== 'notify') return
+    if (!['notify', 'append'].includes(type)) return
 
     for (const msg of messages) {
       try {
