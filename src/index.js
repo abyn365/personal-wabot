@@ -27,6 +27,8 @@ const LIBSIGNAL_NOISE_PATTERNS = [
   /Session error:Error: Bad MAC Error: Bad MAC/,
   /Closing open session in favor of incoming prekey bundle/,
   /Closing session: SessionEntry/,
+  /SessionEntry\s*\{/,
+  /libsignal\/src\/(session_cipher|crypto|queue_job)\.js/,
 ]
 
 function shouldSuppressLibsignalNoise(args = []) {
@@ -45,24 +47,23 @@ ${arg.stack || ''}`
 function installLibsignalLogFilter() {
   if (!toBool(process.env.SUPPRESS_LIBSIGNAL_NOISE, true)) return
 
-  const originalError = console.error.bind(console)
-  const originalLog = console.log.bind(console)
+  const levels = ['error', 'warn', 'log', 'info', 'debug', 'trace']
 
-  console.error = (...args) => {
-    if (shouldSuppressLibsignalNoise(args)) return
-    originalError(...args)
-  }
-
-  console.log = (...args) => {
-    if (shouldSuppressLibsignalNoise(args)) return
-    originalLog(...args)
+  for (const level of levels) {
+    const original = console[level]?.bind(console)
+    if (!original) continue
+    console[level] = (...args) => {
+      if (shouldSuppressLibsignalNoise(args)) return
+      original(...args)
+    }
   }
 }
 
 installLibsignalLogFilter()
 
 const BOT_NAME = process.env.BOT_NAME || 'PersonalBot'
-const PREFIX = process.env.BOT_PREFIX || '!'
+const COMMAND_PREFIXES = parsePrefixes(process.env.BOT_PREFIXES, process.env.BOT_PREFIX || '!')
+const PREFIX = COMMAND_PREFIXES[0]
 const BOT_LANG = (process.env.BOT_LANG || 'en').toLowerCase()
 const [STICKER_PACK, STICKER_AUTHOR] = (process.env.STICKER_PACKNAME || 'Lmao,made by ABYN').split(',').map((x) => x.trim())
 const AUTH_DIR = path.resolve(process.env.AUTH_DIR || 'data/auth')
@@ -102,6 +103,16 @@ function parseNumbers(raw = '') {
 
 function parseJids(raw = '') {
   return raw.split(',').map((x) => x.trim()).filter(Boolean).map((x) => (x.includes('@') ? x : `${x.replace(/\+/g, '')}@s.whatsapp.net`))
+}
+
+function parsePrefixes(raw = '', fallback = '!') {
+  const configured = String(raw || '')
+    .split(',')
+    .map((x) => x.trim())
+    .filter(Boolean)
+
+  const defaults = [fallback, '.']
+  return Array.from(new Set([...configured, ...defaults]))
 }
 
 function parseTargetJid(input, currentChatJid) {
@@ -173,11 +184,15 @@ function isAuthorized(senderJid) {
 }
 
 function parseCommand(text) {
-  if (!text?.startsWith(PREFIX)) return null
-  const raw = text.slice(PREFIX.length).trim()
+  const input = String(text || '')
+  const prefix = COMMAND_PREFIXES.find((candidate) => input.startsWith(candidate))
+  if (!prefix) return null
+
+  const raw = input.slice(prefix.length).trim()
   if (!raw) return null
+
   const [cmd, ...parts] = raw.split(' ')
-  return { command: cmd.toLowerCase(), args: parts, fullArgs: parts.join(' ').trim() }
+  return { command: cmd.toLowerCase(), args: parts, fullArgs: parts.join(' ').trim(), prefix }
 }
 
 function parseDurationToken(token = '') {
