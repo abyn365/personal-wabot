@@ -656,30 +656,12 @@ async function connect() {
       }
       if (code === DisconnectReason.loggedOut) {
         if (pairingState.awaitingInitialPairing) {
-          pairingState.reconnects += 1
-          if (pairingState.reconnects > INITIAL_PAIRING_MAX_RECONNECTS) {
-            logger.error({
-              reconnects: pairingState.reconnects,
-              maxReconnects: INITIAL_PAIRING_MAX_RECONNECTS,
-              attempts: pairingState.codeAttempts,
-              maxAttempts: PAIRING_MAX_ATTEMPTS_PER_SESSION,
-              elapsed: formatDuration(Date.now() - pairingState.sessionStartAt)
-            }, 'Initial pairing reconnect limit reached. Session logged out while waiting for pairing. No automatic reconnect will be attempted to prevent infinite pairing code generation. Restart the bot to try again.')
-            pairingState.pairingInProgress = false
-            return
-          }
-
-          logger.warn({
-            reconnects: pairingState.reconnects,
-            maxReconnects: INITIAL_PAIRING_MAX_RECONNECTS,
-            delayMs: INITIAL_PAIRING_RECONNECT_DELAY_MS,
+          logger.error({
             attempts: pairingState.codeAttempts,
-            maxAttempts: PAIRING_MAX_ATTEMPTS_PER_SESSION
-          }, 'Session closed while waiting for pairing. Waiting before reconnect to issue a fresh pairing code (use newest code only).')
-          setTimeout(() => {
-            pairingState.shouldGenerateCode = true
-            connect().catch((error) => logger.error({ error: formatErrShort(error) }, 'Initial pairing reconnect failed'))
-          }, Math.max(1000, INITIAL_PAIRING_RECONNECT_DELAY_MS))
+            maxAttempts: PAIRING_MAX_ATTEMPTS_PER_SESSION,
+            elapsed: formatDuration(Date.now() - pairingState.sessionStartAt)
+          }, 'Session logged out while waiting for initial pairing. Automatic reconnect is disabled to prevent infinite pairing code generation loop. Please restart the bot manually to generate a new pairing code.')
+          pairingState.pairingInProgress = false
           return
         }
 
