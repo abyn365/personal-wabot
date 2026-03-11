@@ -433,35 +433,42 @@ async function connect() {
   // ── Connection state ──────────────────────────────────────────────────────
   let pairingCodeSent = false
 
+  // For new sessions: kick off pairing code after a delay from 'connecting'.
+  // We can't use 'open' because WA never fires it during a fresh registration
+  // handshake — it stays in 'connecting' until the code is entered.
+  // The delay covers the time WA needs to complete the noise handshake and
+  // device registration exchange (the "not logged in, attempting registration" step).
+  if (needsPairing) {
+    const ownerPhone = OWNER_NUMBERS[0]
+    if (!ownerPhone) {
+      logger.error('OWNER_NUMBERS not set — cannot generate pairing code.')
+    } else {
+      setTimeout(async () => {
+        if (pairingCodeSent) return
+        pairingCodeSent = true
+        logger.info('Requesting pairing code...')
+        try {
+          const code = await sock.requestPairingCode(ownerPhone)
+          logger.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
+          logger.info(`  PAIRING CODE : ${code}`)
+          logger.info(`  Phone        : +${ownerPhone}`)
+          logger.info('  WhatsApp → Linked Devices → Link a Device')
+          logger.info('  → Link with phone number → enter the code above')
+          logger.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
+        } catch (err) {
+          logger.error({ err }, 'Failed to request pairing code — will retry on next restart.')
+          pairingCodeSent = false
+        }
+      }, 3000)
+    }
+  }
+
   sock.ev.on('connection.update', async ({ connection, lastDisconnect }) => {
     if (!connection) return
     logger.info({ connection }, 'Connection state changed')
 
     if (connection === 'open') {
       logger.info({ bot: BOT_NAME }, '✅ Bot is online and ready')
-
-      // Request pairing code here — socket is fully ready at this point.
-      // Only for fresh unregistered sessions.
-      if (needsPairing && !pairingCodeSent) {
-        pairingCodeSent = true
-        const ownerPhone = OWNER_NUMBERS[0]
-        if (!ownerPhone) {
-          logger.error('OWNER_NUMBERS not set — cannot generate pairing code.')
-        } else {
-          try {
-            const code = await sock.requestPairingCode(ownerPhone)
-            logger.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
-            logger.info(`  PAIRING CODE : ${code}`)
-            logger.info(`  Phone        : +${ownerPhone}`)
-            logger.info('  WhatsApp → Linked Devices → Link a Device')
-            logger.info('  → Link with phone number → enter the code above')
-            logger.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
-          } catch (err) {
-            logger.error({ err }, 'Failed to request pairing code.')
-          }
-        }
-      }
-
       hydrateSchedules(sock)
       setupAutoUpdate(sock)
     }
