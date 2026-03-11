@@ -39,6 +39,8 @@ const ALLOW_PAIRING_COMMAND = toBool(process.env.ALLOW_PAIRING_COMMAND, false)
 const AUTO_CLEAR_AUTH_ON_LOGOUT = toBool(process.env.AUTO_CLEAR_AUTH_ON_LOGOUT, false)
 const INITIAL_PAIRING_RECONNECT_DELAY_MS = Number(process.env.INITIAL_PAIRING_RECONNECT_DELAY_MS || 4000)
 const INITIAL_PAIRING_MAX_RECONNECTS = Number(process.env.INITIAL_PAIRING_MAX_RECONNECTS || 20)
+const PAIRING_CODE_COOLDOWN_MS = Number(process.env.PAIRING_CODE_COOLDOWN_MS || 60000)
+const PAIRING_MAX_ATTEMPTS_PER_SESSION = Number(process.env.PAIRING_MAX_ATTEMPTS_PER_SESSION || 3)
 
 const OWNER_NUMBERS = parseNumbers(process.env.OWNER_NUMBERS)
 const AUTHORIZED_NUMBERS = Array.from(new Set([...OWNER_NUMBERS, ...parseNumbers(process.env.AUTHORIZED_NUMBERS)]))
@@ -59,6 +61,51 @@ const connLogState = {
 
 const pairingState = {
   reconnects: 0,
+  shouldGenerateCode: false,
+  isInFlight: false,
+  awaitingInitialPairing: false,
+  lastGeneratedAt: 0,
+  codeAttempts: 0,
+  pairingInProgress: false,
+  sessionStartAt: 0,
+}
+
+function resetPairingSession() {
+  pairingState.reconnects = 0
+  pairingState.shouldGenerateCode = false
+  pairingState.isInFlight = false
+  pairingState.awaitingInitialPairing = false
+  pairingState.lastGeneratedAt = 0
+  pairingState.codeAttempts = 0
+  pairingState.pairingInProgress = false
+  pairingState.sessionStartAt = Date.now()
+}
+
+function isPairingCooldownActive() {
+  if (pairingState.lastGeneratedAt === 0) return false
+  return Date.now() - pairingState.lastGeneratedAt < PAIRING_CODE_COOLDOWN_MS
+}
+
+function canGeneratePairingCode() {
+  if (!pairingState.shouldGenerateCode) return false
+  if (pairingState.isInFlight) return false
+  if (pairingState.pairingInProgress) return false
+  if (isPairingCooldownActive()) return false
+  if (pairingState.codeAttempts >= PAIRING_MAX_ATTEMPTS_PER_SESSION) return false
+  return true
+}
+
+function markPairingCodeGenerated() {
+  pairingState.lastGeneratedAt = Date.now()
+  pairingState.codeAttempts += 1
+  pairingState.shouldGenerateCode = false
+}
+
+function markPairingComplete() {
+  pairingState.shouldGenerateCode = false
+  pairingState.isInFlight = false
+  pairingState.awaitingInitialPairing = false
+  pairingState.pairingInProgress = false
 }
 
 ensureJsonDb()
@@ -462,27 +509,36 @@ async function connect() {
     markOnlineOnConnect: !HIDE_ONLINE,
   })
 
-  let shouldGenerateStartupPairingCode = false
-  let startupPairingInFlight = false
-  let awaitingInitialPairing = !state.creds?.registered
+  pairingState.awaitingInitialPairing = !state.creds?.registered
 
   async function tryGenerateStartupPairingCode() {
-    if (!shouldGenerateStartupPairingCode || startupPairingInFlight) return
+    if (!canGeneratePairingCode()) {
+      const cooldown = isPairingCooldownActive()
+      if (cooldown) {
+        const cooldownRemaining = Math.ceil((PAIRING_CODE_COOLDOWN_MS - (Date.now() - pairingState.lastGeneratedAt)) / 1000)
+        logger.debug({ cooldownRemaining }, 'Pairing code generation in cooldown, skipping')
+      } else if (pairingState.codeAttempts >= PAIRING_MAX_ATTEMPTS_PER_SESSION) {
+        logger.warn({ attempts: pairingState.codeAttempts, max: PAIRING_MAX_ATTEMPTS_PER_SESSION }, 'Pairing code max attempts reached')
+      }
+      return
+    }
 
     const ownerForPairing = OWNER_NUMBERS[0]
     if (!ownerForPairing) {
-      shouldGenerateStartupPairingCode = false
+      pairingState.shouldGenerateCode = false
       logger.warn('OWNER_NUMBERS is empty, cannot auto-generate pairing code on startup.')
       return
     }
 
-    startupPairingInFlight = true
+    pairingState.isInFlight = true
+    pairingState.pairingInProgress = true
+
     const maxAttempts = 6
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       try {
         const code = await sock.requestPairingCode(ownerForPairing)
-        shouldGenerateStartupPairingCode = false
-        logger.info({ phone: ownerForPairing, code, attempt, maxAttempts }, 'Pairing code generated')
+        markPairingCodeGenerated()
+        logger.info({ phone: ownerForPairing, code, attempt: pairingState.codeAttempts, maxAttempts: PAIRING_MAX_ATTEMPTS_PER_SESSION }, 'Pairing code generated')
         break
       } catch (error) {
         const status = new Boom(error)?.output?.statusCode
@@ -492,13 +548,16 @@ async function connect() {
         await waitMs(2000)
       }
     }
-    startupPairingInFlight = false
+    pairingState.isInFlight = false
   }
 
   if (!state.creds?.registered) {
     logger.info('WhatsApp is not linked yet.')
     logger.info('Use WhatsApp > Linked Devices > Link with phone number only.')
-    shouldGenerateStartupPairingCode = true
+    if (pairingState.sessionStartAt === 0) {
+      resetPairingSession()
+    }
+    pairingState.shouldGenerateCode = true
     setTimeout(() => {
       tryGenerateStartupPairingCode().catch((error) => logger.warn({ error: formatErrShort(error) }, 'Startup pairing bootstrap failed'))
     }, 1500)
@@ -508,7 +567,7 @@ async function connect() {
   setupAutoUpdate(sock)
   sock.ev.on('creds.update', () => {
     saveCreds()
-    if (state.creds?.registered) awaitingInitialPairing = false
+    if (state.creds?.registered) markPairingComplete()
   })
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
@@ -572,7 +631,7 @@ async function connect() {
 
     if (qr) {
       logger.info('QR received, but this bot is configured to prioritize phone-number pairing code.')
-      if (shouldGenerateStartupPairingCode) {
+      if (canGeneratePairingCode()) {
         tryGenerateStartupPairingCode().catch((error) => logger.warn({ error: formatErrShort(error) }, 'QR-triggered pairing request failed'))
       }
     }
@@ -580,12 +639,12 @@ async function connect() {
     if (connection === 'open') {
       pairingState.reconnects = 0
       logger.info({ bot: BOT_NAME }, 'Bot is online')
-      if (shouldGenerateStartupPairingCode) {
+      if (canGeneratePairingCode()) {
         tryGenerateStartupPairingCode().catch((error) => logger.warn({ error: formatErrShort(error) }, 'Open-triggered pairing request failed'))
       }
     }
 
-    if (connection === 'connecting' && shouldGenerateStartupPairingCode) {
+    if (connection === 'connecting' && canGeneratePairingCode()) {
       tryGenerateStartupPairingCode().catch((error) => logger.warn({ error: formatErrShort(error) }, 'Connecting-triggered pairing request failed'))
     }
 
@@ -596,20 +655,33 @@ async function connect() {
         logger.warn({ code, reason: connReasonLabel(code), shouldReconnect }, 'Connection closed')
       }
       if (code === DisconnectReason.loggedOut) {
-          if (awaitingInitialPairing) {
-            pairingState.reconnects += 1
-            if (pairingState.reconnects > INITIAL_PAIRING_MAX_RECONNECTS) {
-              logger.error({ reconnects: pairingState.reconnects, maxReconnects: INITIAL_PAIRING_MAX_RECONNECTS }, 'Initial pairing reconnect limit reached. Restart bot to request a fresh code again.')
-              return
-            }
-
-            logger.warn({ reconnects: pairingState.reconnects, maxReconnects: INITIAL_PAIRING_MAX_RECONNECTS, delayMs: INITIAL_PAIRING_RECONNECT_DELAY_MS }, 'Session closed while waiting for pairing. Reconnecting to issue a fresh pairing code (use newest code only).')
-            setTimeout(() => {
-              shouldGenerateStartupPairingCode = true
-              connect().catch((error) => logger.error({ error: formatErrShort(error) }, 'Initial pairing reconnect failed'))
-            }, Math.max(1000, INITIAL_PAIRING_RECONNECT_DELAY_MS))
+        if (pairingState.awaitingInitialPairing) {
+          pairingState.reconnects += 1
+          if (pairingState.reconnects > INITIAL_PAIRING_MAX_RECONNECTS) {
+            logger.error({
+              reconnects: pairingState.reconnects,
+              maxReconnects: INITIAL_PAIRING_MAX_RECONNECTS,
+              attempts: pairingState.codeAttempts,
+              maxAttempts: PAIRING_MAX_ATTEMPTS_PER_SESSION,
+              elapsed: formatDuration(Date.now() - pairingState.sessionStartAt)
+            }, 'Initial pairing reconnect limit reached. Session logged out while waiting for pairing. No automatic reconnect will be attempted to prevent infinite pairing code generation. Restart the bot to try again.')
+            pairingState.pairingInProgress = false
             return
           }
+
+          logger.warn({
+            reconnects: pairingState.reconnects,
+            maxReconnects: INITIAL_PAIRING_MAX_RECONNECTS,
+            delayMs: INITIAL_PAIRING_RECONNECT_DELAY_MS,
+            attempts: pairingState.codeAttempts,
+            maxAttempts: PAIRING_MAX_ATTEMPTS_PER_SESSION
+          }, 'Session closed while waiting for pairing. Waiting before reconnect to issue a fresh pairing code (use newest code only).')
+          setTimeout(() => {
+            pairingState.shouldGenerateCode = true
+            connect().catch((error) => logger.error({ error: formatErrShort(error) }, 'Initial pairing reconnect failed'))
+          }, Math.max(1000, INITIAL_PAIRING_RECONNECT_DELAY_MS))
+          return
+        }
 
         if (AUTO_CLEAR_AUTH_ON_LOGOUT) {
           fs.rmSync(AUTH_DIR, { recursive: true, force: true })
