@@ -18,6 +18,7 @@ Personal WhatsApp bot built with Baileys, designed for VPS deployment with a pra
 - AFK mode with auto notice reply for non-authorized chats
 - Automation:
   - keyword auto responders
+- Sticker creator from replied images with packname/author metadata
 - **Message scheduler**:
   - schedule text messages to any JID
   - schedule forwarded replied messages (supports many chat/media types by forwarding original quoted payload)
@@ -55,6 +56,7 @@ Personal WhatsApp bot built with Baileys, designed for VPS deployment with a pra
 - `!schedule fwd <time> <jid|current>` — reply to any message, then schedule forwarding
 - `!schedule list` — list your schedules
 - `!schedule cancel <id>` — cancel schedule
+- `!sticker` — reply an image to convert into sticker with metadata
 - `!quote` — get random quote
 - `!quote add <text>` — add quote
 - `!auto add <keyword> | <response>` — add auto reply rule
@@ -86,7 +88,7 @@ What it does:
 - install base packages
 - install/use Node via `nvm` based on `.nvmrc`
 - install dependencies
-- create `.env` **interactively** via prompts (including language `en/id`)
+- create `.env` **interactively** via prompts (including language `en/id` and sticker pack metadata)
 - run syntax check
 
 Raw script usage:
@@ -99,6 +101,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/abyn365/personal-wabot/main/
 
 See `.env.example` for full options:
 - localization (`BOT_LANG=en|id`)
+- sticker metadata (`STICKER_PACKNAME=PackName,Author`)
 - auth/access (`OWNER_NUMBERS`, `AUTHORIZED_NUMBERS`)
 - privacy (`HIDE_ONLINE`, `HIDE_READ_CHAT`, `HIDE_STATUS_VIEW`)
 - forwarding (`EVENT_FORWARD_JIDS`, `VIEW_ONCE_FORWARD_JIDS`, `STATUS_FORWARD_JIDS`)

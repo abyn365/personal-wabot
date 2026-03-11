@@ -54,6 +54,7 @@ if [[ ! -f .env ]]; then
     BOT_NAME_VALUE="$(ask 'Bot name' 'PersonalBot')"
     BOT_PREFIX_VALUE="$(ask 'Command prefix' '!')"
     BOT_LANG_VALUE="$(ask 'Bot language (en/id)' 'en')"
+    STICKER_PACKNAME_VALUE="$(ask 'Sticker packname,author' 'Lmao,made by ABYN')"
     OWNER_NUMBERS_VALUE="$(ask 'Owner numbers (comma-separated, no +)' '6281234567890')"
     AUTHORIZED_NUMBERS_VALUE="$(ask 'Additional authorized numbers (comma-separated, optional)' '')"
     HIDE_ONLINE_VALUE="$(ask 'Hide online presence? (true/false)' 'true')"
@@ -80,6 +81,7 @@ LOG_LEVEL=info
 AUTH_DIR=data/auth
 DB_FILE=data/store.json
 STATUS_DIR=data/status
+STICKER_PACKNAME=${STICKER_PACKNAME_VALUE}
 
 HIDE_ONLINE=${HIDE_ONLINE_VALUE}
 HIDE_READ_CHAT=${HIDE_READ_CHAT_VALUE}

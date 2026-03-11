@@ -13,6 +13,7 @@ import {
   generateWAMessageFromContent,
 } from '@whiskeysockets/baileys'
 import { Boom } from '@hapi/boom'
+import { Sticker, StickerTypes } from 'wa-sticker-formatter'
 
 const logger = P({ level: process.env.LOG_LEVEL || 'info' })
 const startTime = Date.now()
@@ -20,6 +21,7 @@ const startTime = Date.now()
 const BOT_NAME = process.env.BOT_NAME || 'PersonalBot'
 const PREFIX = process.env.BOT_PREFIX || '!'
 const BOT_LANG = (process.env.BOT_LANG || 'en').toLowerCase()
+const [STICKER_PACK, STICKER_AUTHOR] = (process.env.STICKER_PACKNAME || 'Lmao,made by ABYN').split(',').map((x) => x.trim())
 const AUTH_DIR = path.resolve(process.env.AUTH_DIR || 'data/auth')
 const DB_FILE = path.resolve(process.env.DB_FILE || 'data/store.json')
 const STATUS_DIR = path.resolve(process.env.STATUS_DIR || 'data/status')
@@ -57,6 +59,8 @@ function t(key, vars = {}) {
       scheduleNotFound: 'Schedule ID not found.',
       afkOn: '✅ AFK enabled.',
       afkOff: '✅ AFK disabled.',
+      stickerReply: `Reply to an image with ${PREFIX}sticker`,
+      stickerFail: 'Failed to create sticker.',
     },
     id: {
       unauthorized: '⛔ Kamu tidak punya akses untuk memakai bot ini.',
@@ -71,6 +75,8 @@ function t(key, vars = {}) {
       scheduleNotFound: 'ID schedule tidak ditemukan.',
       afkOn: '✅ Mode AFK aktif.',
       afkOff: '✅ Mode AFK nonaktif.',
+      stickerReply: `Balas gambar dengan ${PREFIX}sticker`,
+      stickerFail: 'Gagal membuat stiker.',
     },
   }
   const lang = dict[BOT_LANG] ? BOT_LANG : 'en'
@@ -276,6 +282,51 @@ function registerScheduleJob(sock, item) {
   scheduleJobs.set(item.id, timeout)
 }
 
+
+function getQuotedContextMessage(msg) {
+  const source =
+    msg.message?.extendedTextMessage ||
+    msg.message?.imageMessage ||
+    msg.message?.videoMessage ||
+    msg.message?.documentMessage
+
+  const ctx = source?.contextInfo
+  if (!ctx?.quotedMessage) return null
+
+  return {
+    key: {
+      remoteJid: msg.key.remoteJid,
+      fromMe: false,
+      id: ctx.stanzaId,
+      participant: ctx.participant || msg.key.participant || msg.key.remoteJid,
+    },
+    message: ctx.quotedMessage,
+  }
+}
+
+async function makeStickerFromQuoted(sock, msg) {
+  const quoted = getQuotedContextMessage(msg)
+  if (!quoted || !quoted.message?.imageMessage) return { error: t('stickerReply') }
+
+  try {
+    const buffer = await downloadMediaMessage(quoted, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage })
+    if (!buffer?.length) return { error: t('stickerFail') }
+
+    const sticker = new Sticker(buffer, {
+      pack: STICKER_PACK || 'Lmao',
+      author: STICKER_AUTHOR || 'made by ABYN',
+      type: StickerTypes.FULL,
+      quality: 80,
+    })
+
+    const stickerBuffer = await sticker.toBuffer()
+    return { stickerBuffer }
+  } catch (error) {
+    logger.warn({ err: error }, 'Sticker creation failed')
+    return { error: t('stickerFail') }
+  }
+}
+
 async function connect() {
   ensureDir(AUTH_DIR)
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR)
@@ -477,6 +528,7 @@ async function handleCommand(sock, msg, cmd, senderJid) {
         `${PREFIX}schedule text <time> <jid|current> <msg> — schedule text`,
         `${PREFIX}schedule fwd <time> <jid|current> — schedule replied media/message`,
         `${PREFIX}schedule list|cancel <id> — scheduler manager`,
+        `${PREFIX}sticker — reply image to create sticker`,
         `${PREFIX}quote [add <text>] — quotes`,
         `${PREFIX}auto add|list|del — auto responder rules`,
         `${PREFIX}afk on <msg>|off|status — AFK mode`,
@@ -521,6 +573,15 @@ async function handleCommand(sock, msg, cmd, senderJid) {
     case 'schedule':
       await handleScheduler(sock, msg, cmd, senderJid)
       break
+    case 'sticker': {
+      const { stickerBuffer, error } = await makeStickerFromQuoted(sock, msg)
+      if (error) {
+        await sock.sendMessage(chatJid, { text: error }, { quoted: msg })
+        break
+      }
+      await sock.sendMessage(chatJid, { sticker: stickerBuffer }, { quoted: msg })
+      break
+    }
     case 'stats': {
       const totalTodos = db.todos.length
       const completed = db.todos.filter((t) => t.done).length
